@@ -3,7 +3,7 @@ name: EMU Test
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, difftest-ci ]
   pull_request:
     branches: [ master ]
 
@@ -32,7 +32,7 @@ jobs:
           submodules: 'recursive'
       - name: set env
         run: |
-          echo "NEMU_HOME=/home/ci-runner/xsenv/NEMU" >> $GITHUB_ENV
+          echo "NEMU_HOME=/home/ci-runner/xsenv/new-NEMU" >> $GITHUB_ENV
           echo "AM_HOME=/home/ci-runner/xsenv/nexus-am" >> $GITHUB_ENV
           echo "PERF_HOME=/bigdata/xs-perf/${GITHUB_SHA}" >> $GITHUB_ENV
           mkdir -p /bigdata/xs-perf/${GITHUB_SHA}
@@ -71,7 +71,7 @@ jobs:
           submodules: 'recursive'
       - name: set env
         run: |
-          echo "NEMU_HOME=/home/ci-runner/xsenv/NEMU" >> $GITHUB_ENV
+          echo "NEMU_HOME=/home/ci-runner/xsenv/new-NEMU" >> $GITHUB_ENV
           echo "AM_HOME=/home/ci-runner/xsenv/nexus-am" >> $GITHUB_ENV
           echo "PERF_HOME=/bigdata/xs-perf/${GITHUB_SHA}" >> $GITHUB_ENV
           mkdir -p /bigdata/xs-perf/${GITHUB_SHA}

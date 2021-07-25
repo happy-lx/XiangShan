@@ -25,7 +25,7 @@ class XSArgs(object):
     script_path = os.path.realpath(__file__)
     # default path to the repositories
     noop_home = os.path.join(os.path.dirname(script_path), "..")
-    nemu_home = os.path.join(noop_home, "../NEMU")
+    nemu_home = os.path.join(noop_home, "../new-NEMU")
     am_home = os.path.join(noop_home, "../nexus-am")
     dramsim3_home = os.path.join(noop_home, "../DRAMsim3")
     rvtest_home = os.path.join(noop_home, "../riscv-tests")
