@@ -23,6 +23,7 @@ import xiangshan._
 import utils._
 import xiangshan.backend.roq.RoqPtr
 import xiangshan.backend.fu.util.HasCSRConst
+import xiangshan.cache.MemoryOpConstants
 import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import freechips.rocketchip.tilelink._
 
@@ -96,6 +97,24 @@ class CAMTemplate[T <: Data](val gen: T, val set: Int, val readWidth: Int)(impli
   }
 }
 
+//because of the merging behavior , we should consider the vpn tag bits for hitting check
+class TlbNMMeta(implicit p: Parameters) extends TlbBundle {
+  val tag = UInt(vpnLen.W) // tag is vpn
+  val len = UInt(log2Ceil(max_merge_num).W)
+
+  def Tag_HI = (this.tag + this.len)(vpnLen - 1,0) 
+  def Tag_LO = this.tag
+
+  def hit(vpn: UInt): Bool = (vpn >= Tag_LO && vpn <= Tag_HI)
+
+  def apply(vpn: UInt,len: UInt) = {
+    this.tag := vpn
+    this.len := len
+    this
+  }
+
+}
+
 class TlbSPMeta(implicit p: Parameters) extends TlbBundle {
   val tag = UInt(vpnLen.W) // tag is vpn
   val level = UInt(1.W) // 1 for 2MB, 0 for 1GB
@@ -114,6 +133,37 @@ class TlbSPMeta(implicit p: Parameters) extends TlbBundle {
     this
   }
 
+}
+
+class TlbSPMeta_Mergeable(implicit p: Parameters) extends TlbSPMeta {
+  val len = UInt(log2Ceil(max_merge_num).W)
+
+  def getTagByLevel: UInt = Mux(this.level.asBool,tag(vpnnLen*3-1, vpnnLen*1),tag(vpnnLen*3-1, vpnnLen*2))
+
+  def getVpnByLevel(vpn: UInt): UInt = {
+    assert(vpn.getWidth == vpnLen)
+    Mux(this.level.asBool,vpn(vpnnLen*3-1, vpnnLen*1),vpn(vpnnLen*3-1, vpnnLen*2))
+    }
+  
+  def Tag_HI: UInt = {
+    Mux(this.level.asBool,(getTagByLevel + this.len)((2 * vpnnLen) - 1,0),(getTagByLevel + this.len)(vpnnLen - 1,0))
+  }
+  def Tag_LO: UInt = {
+    Mux(this.level.asBool,(getTagByLevel)((2 * vpnnLen) - 1,0),(getTagByLevel)(vpnnLen - 1,0))
+  }
+
+  override def hit(vpn: UInt): Bool = {
+    val fix_vpn = getVpnByLevel(vpn)
+    (fix_vpn >= Tag_LO && fix_vpn <= Tag_HI)
+  }
+
+  def apply(vpn: UInt, level: UInt, len: UInt) = {
+    this.tag := vpn
+    this.level := level(0)
+    this.len := len
+
+    this
+  }
 }
 
 class TlbData(superpage: Boolean = false)(implicit p: Parameters) extends TlbBundle {
@@ -163,6 +213,45 @@ class TlbData(superpage: Boolean = false)(implicit p: Parameters) extends TlbBun
   }
 
   override def cloneType: this.type = (new TlbData(superpage)).asInstanceOf[this.type]
+}
+
+class TlbData_Mergeable(superpage: Boolean = false)(implicit p: Parameters) extends TlbData(superpage) {
+  //a new PPN generator is used here
+  def genPPN(vpn : UInt,hitTag : UInt):UInt = {
+    // bias is the (vpn - tag) * stride = Cat(vpn-tag,0.U(colt_stride_len.W))
+    val bias = (
+              if(superpage)
+              {
+                val insideLevel = level.getOrElse(0.U)
+                if(colt_stride != 1)
+                {
+                  Mux(insideLevel.asBool,Cat((vpn(vpnLen - 1,vpnnLen * 1) - hitTag(vpnLen - 1,vpnnLen * 1)),0.U(colt_stride_len.W)),Cat((vpn(vpnLen - 1,vpnnLen * 2) - hitTag(vpnLen - 1,vpnnLen * 2)),0.U(colt_stride_len.W)))
+                }else
+                {
+                  Mux(insideLevel.asBool,(vpn(vpnLen - 1,vpnnLen * 1) - hitTag(vpnLen - 1,vpnnLen * 1)),(vpn(vpnLen - 1,vpnnLen * 2) - hitTag(vpnLen - 1,vpnnLen * 2)) )
+                }
+          
+              }else
+              {
+                if(colt_stride != 1)
+                {
+                  Cat((vpn - hitTag),0.U(colt_stride_len.W))
+                }else
+                {
+                  vpn - hitTag
+                }
+              }
+    )
+    if (superpage) {
+      val insideLevel = level.getOrElse(0.U)
+      Mux(insideLevel.asBool, Cat((ppn(ppn.getWidth-1, vpnnLen*1) + bias)(ppn.getWidth - vpnnLen - 1, 0), vpn((vpnnLen*1) - 1, 0)),
+                              Cat((ppn(ppn.getWidth-1, vpnnLen*2) + bias)(ppn.getWidth - (vpnnLen * 2) - 1, 0), vpn((vpnnLen*2) - 1, 0)))
+    } else {
+      (ppn + bias)(ppn.getWidth-1 , 0)
+    }
+  }
+
+  override def cloneType: this.type = (new TlbData_Mergeable(superpage)).asInstanceOf[this.type]
 }
 
 object TlbCmd {
@@ -322,6 +411,20 @@ class PtwEntry(tagLen: Int, hasPerm: Boolean = false, hasLevel: Boolean = false)
       tag === vpn(vpnLen - 1, vpnLen - tagLen)
     }
   }
+  // this hit function is for mergeable TLB entries and normal TLB entries used in TLB filter
+  def hit(vpn: UInt, len: UInt) = {
+    require(vpn.getWidth == vpnLen)
+    require(tagLen == vpnLen)
+    require(hasLevel)
+
+    //hit when tag_lo <= vpn <= tag_hi
+    val tag_lo = Mux(level.getOrElse(0.U) === 2.U,tag,Mux(level.getOrElse(0.U) === 1.U,tag(tag.getWidth-1,vpnnLen),tag(tag.getWidth-1,vpnnLen * 2)))
+    val tag_hi = Mux(level.getOrElse(0.U) === 2.U,(tag + len)(tag.getWidth-1,0),Mux(level.getOrElse(0.U) === 1.U,(tag(tag.getWidth-1,vpnnLen) + len)(tag.getWidth-vpnnLen-1,0),(tag(tag.getWidth-1,vpnnLen * 2) + len)(tag.getWidth-(2*vpnnLen)-1,0) ))
+    val clipped_vpn = Mux(level.getOrElse(0.U) === 2.U,vpn,Mux(level.getOrElse(0.U) === 1.U,vpn(vpn.getWidth-1,vpnnLen),vpn(vpn.getWidth-1,vpnnLen * 2)))
+    
+    (clipped_vpn >= tag_lo && clipped_vpn <= tag_hi)
+    
+  }
 
   def refill(vpn: UInt, pte: UInt, level: UInt = 0.U) {
     tag := vpn(vpnLen - 1, vpnLen - tagLen)
@@ -404,6 +507,8 @@ class PtwReq(implicit p: Parameters) extends PtwBundle {
 class PtwResp(implicit p: Parameters) extends PtwBundle {
   val entry = new PtwEntry(tagLen = vpnLen, hasPerm = true, hasLevel = true)
   val pf  = Bool()
+  // val len = if(EnbaleColt) UInt((log2Ceil(max_merge_num)).W) else null
+  val len = UInt((log2Ceil(max_merge_num)).W)
 
   override def toPrintable: Printable = {
     p"entry:${entry} pf:${pf}"
@@ -433,5 +538,104 @@ object OneCycleValid {
     when (fire) { valid := true.B }
     when (flush) { valid := false.B }
     valid
+  }
+}
+
+trait HasColtUtils extends HasPtwConst with HasTlbConst with MemoryOpConstants{
+  def ColtCanMerge(ptes : Seq[PteBundle] , level : UInt) : Bool = {
+    // gen the clipped ppn 
+    val clipped_ppns = ptes.map(pte => Mux(level === 0.U,
+                                            pte.ppn(pte.ppn.getWidth-1,vpnnLen * 2),
+                                            Mux(level === 1.U,
+                                              pte.ppn(pte.ppn.getWidth-1,vpnnLen * 1),
+                                              pte.ppn
+                                            )))
+    //1. PPN stride matches 
+    val stride_match = {
+      val base_ppn = clipped_ppns(0)
+      val matches = Wire(Vec(MemBandWidth/XLEN,new Bool))
+      for ( i <- 0 until MemBandWidth/XLEN )
+      {
+        if(i == 0)
+        {
+          matches(i) := true.B
+        }else
+        {
+          val stride = colt_stride * i
+          matches(i) := (base_ppn + stride.U) === clipped_ppns(i)
+        }
+      }
+      matches.asUInt.andR
+    }
+    //2. perm bits match
+    val perm_match = {
+      val base_perm = ptes(0).perm.asUInt
+      val matches = Wire(Vec(MemBandWidth/XLEN,new Bool))
+      for( i <- 0 until MemBandWidth/XLEN )
+      {
+       if(i == 0)
+       {
+         matches(i) := true.B
+       }else
+       {
+         val temp = {
+           val base_perm_withoutAD = base_perm.asTypeOf(PtePermBundle_mergeable).others.asUInt
+           val pte_perm_withoutAD  = ptes(i).perm.asUInt.asTypeOf(PtePermBundle_mergeable).others.asUInt
+           (base_perm_withoutAD === pte_perm_withoutAD)
+         }
+         matches(i) := temp
+      }
+    }
+    matches.asUInt.andR
+  }
+    stride_match && perm_match
+  }
+
+
+  // only for 4KB 
+  def ColtCanMerge_L2(entrys : PtwEntries) : Bool = {
+    //1. PPN stride matches 
+    val stride_match = {
+      val base_ppn = entrys.ppns(0)
+      val matches = Wire(Vec(MemBandWidth/XLEN,new Bool))
+      for ( i <- 0 until MemBandWidth/XLEN )
+      {
+        if(i == 0)
+        {
+          matches(i) := true.B
+        }else
+        {
+          val stride = colt_stride * i
+          matches(i) := (base_ppn + stride.U) === entrys.ppns(i)
+        }
+      }
+      matches.asUInt.andR
+    }
+    //2. perm bits match
+    val perm_match = {
+      val base_perm = entrys.perms.getOrElse(0.U).asTypeOf(Vec(PtwL3SectorSize,new PtePermBundle))(0)
+      val matches = Wire(Vec(MemBandWidth/XLEN,new Bool))
+      for( i <- 0 until MemBandWidth/XLEN )
+      {
+       if(i == 0)
+       {
+         matches(i) := true.B
+       }else
+       {
+         val temp = {
+           val base_perm_withoutAD = base_perm.asTypeOf(PtePermBundle_mergeable).others.asUInt
+           val pte_perm_withoutAD  = entrys.perms.getOrElse(0.U).asTypeOf(Vec(PtwL3SectorSize,new PtePermBundle))(i).asTypeOf(PtePermBundle_mergeable).others.asUInt
+           (base_perm_withoutAD === pte_perm_withoutAD)
+         }
+         matches(i) := temp
+      }
+    }
+    matches.asUInt.andR
+  }
+  //3. vs is all valid 
+  val v_match = Cat(entrys.vs).andR
+
+  stride_match && perm_match && v_match
+  
   }
 }

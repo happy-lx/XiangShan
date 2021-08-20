@@ -59,7 +59,7 @@ class PtwFsmIO()(implicit p: Parameters) extends PtwBundle {
   })
 }
 
-class PtwFsm()(implicit p: Parameters) extends XSModule with HasPtwConst {
+class PtwFsm()(implicit p: Parameters) extends XSModule with HasPtwConst with HasColtUtils{
   val io = IO(new PtwFsmIO)
 
   val sfence = io.sfence
@@ -83,6 +83,33 @@ class PtwFsm()(implicit p: Parameters) extends XSModule with HasPtwConst {
   val memPtes = (0 until PtwL3SectorSize).map(i => memRdata((i+1)*XLEN-1, i*XLEN).asTypeOf(new PteBundle))
   val memPte = memSelData.asTypeOf(new PteBundle)
   val memPteReg = RegEnable(memPte, mem.resp.fire())
+
+  // xpn is the vpn or ppn 
+  // paddr is the mem request address
+  def getBundleAddr(xpn : UInt , paddr : UInt , level : UInt , isVpn : Boolean): UInt = {
+    val bias = if(isVpn || (colt_stride == 1) ) {
+        paddr((log2Up(l1BusDataWidth/8) - 1), log2Up(XLEN/8))
+    }else
+    {
+        Cat(paddr((log2Up(l1BusDataWidth/8) - 1), log2Up(XLEN/8)) , 0.U(colt_stride_len.W))
+    }
+    val res = Wire(UInt(xpn.getWidth.W))
+    when(level === 0.U)
+    {
+      //1G
+      res := Cat((xpn(xpn.getWidth-1,2 * vpnnLen) - bias)(xpn.getWidth - 2 * vpnnLen - 1 ,0) , 0.U((2 * vpnnLen).W))
+    }.elsewhen(level === 1.U)
+    {
+      //2M
+      res := Cat((xpn(xpn.getWidth-1,1 * vpnnLen) - bias)(xpn.getWidth - 1 * vpnnLen - 1 ,0) , 0.U((1 * vpnnLen).W))
+    }.otherwise
+    {
+      //4K
+      res := (xpn - bias)
+    }
+
+    res 
+  }
 
   val notFound = WireInit(false.B)
   switch (state) {
@@ -137,13 +164,37 @@ class PtwFsm()(implicit p: Parameters) extends XSModule with HasPtwConst {
 
   val finish = mem.resp.fire()  && (memPte.isLeaf() || memPte.isPf(level) || level === 2.U)
   val resp = Reg(io.resp.bits.cloneType)
+
+  val hasPageFault = level === 3.U || notFound
+  // NOTE : !!!!!! now only support 4KB merge otherwise the function is wrong
+  val isMergeable = ColtCanMerge(memPtes,level) && !hasPageFault && level === 2.U
   when (finish && !sfenceLatch) {
     resp.source := RegEnable(io.req.bits.source, io.req.fire())
-    resp.resp.pf := level === 3.U || notFound
-    resp.resp.entry.tag := vpn
-    resp.resp.entry.ppn := memPte.ppn
-    resp.resp.entry.perm.map(_ := memPte.getPerm())
+    resp.resp.pf := hasPageFault
+    resp.resp.entry.tag := Mux(isMergeable,getBundleAddr(vpn,memAddrReg,level,true) , vpn)
+    resp.resp.entry.ppn := Mux(isMergeable,getBundleAddr(memPte.ppn,memAddrReg,level,false) , memPte.ppn)
+    // resp.resp.entry.perm.map(_ := memPte.getPerm())
+    // resp.resp.entry.perm.map(_:= memPtes.map(_.getPerm).reduce((a , b) => a & b))
+    when(isMergeable)
+    {
+      resp.resp.entry.perm.map(perm => {
+        perm.d := Cat(memPtes.map(_.getPerm.d)).andR
+        perm.a := Cat(memPtes.map(_.getPerm.a)).andR
+        perm.g := memPte.getPerm.g
+        perm.u := memPte.getPerm.u
+        perm.x := memPte.getPerm.x
+        perm.w := memPte.getPerm.w
+        perm.r := memPte.getPerm.r
+        })
+    }.otherwise
+    {
+      resp.resp.entry.perm.map(_ := memPte.getPerm())
+    }
     resp.resp.entry.level.map(_ := level)
+    //TODO： merge logic
+    //NOTE: NOW only support 11 and 00 which means that we can either merge 4 ptes or merge no pte 
+    resp.resp.len := Mux(isMergeable,3.U,0.U)
+
   }
   io.resp.valid := state === s_resp
   io.resp.bits := resp
@@ -162,6 +213,8 @@ class PtwFsm()(implicit p: Parameters) extends XSModule with HasPtwConst {
 
   XSDebug(p"[fsm] state:${state} level:${level} sfenceLatch:${sfenceLatch} notFound:${notFound}\n")
 
+  XSDebug(p"[fsm] isMergeable:${isMergeable} level:${level} tag_raw:${vpn} bundle_tag:${getBundleAddr(vpn,memAddrReg,level,true)} ppn_raw:${memPte.ppn} bundle_ppn:${getBundleAddr(memPte.ppn,memAddrReg,level,false)}\n")
+
   // perf
   XSPerfAccumulate("fsm_count", io.req.fire())
   for (i <- 0 until PtwWidth) {
@@ -173,4 +226,8 @@ class PtwFsm()(implicit p: Parameters) extends XSModule with HasPtwConst {
   XSPerfAccumulate("mem_count", mem.req.fire())
   XSPerfAccumulate("mem_cycle", BoolStopWatch(mem.req.fire, mem.resp.fire(), true))
   XSPerfAccumulate("mem_blocked", mem.req.valid && !mem.req.ready)
+
+  XSPerfAccumulate("1G_merge_count", io.resp.fire() && resp.resp.len === 3.U && resp.resp.entry.level.getOrElse(0.U).asUInt === 0.U)
+  XSPerfAccumulate("2M_merge_count", io.resp.fire() && resp.resp.len === 3.U && resp.resp.entry.level.getOrElse(0.U).asUInt === 1.U)
+  XSPerfAccumulate("4K_merge_count", io.resp.fire() && resp.resp.len === 3.U && resp.resp.entry.level.getOrElse(0.U).asUInt === 2.U)
 }

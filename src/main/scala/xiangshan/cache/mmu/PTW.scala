@@ -143,6 +143,7 @@ class PTWImp(outer: PTW)(implicit p: Parameters) extends PtwModule(outer) {
     outArb(i).in(0).valid := cache.io.resp.valid && cache.io.resp.bits.hit && cache.io.resp.bits.source===i.U
     outArb(i).in(0).bits.entry := cache.io.resp.bits.toTlb
     outArb(i).in(0).bits.pf := false.B
+    outArb(i).in(0).bits.len := cache.io.resp.bits.len
     outArb(i).in(1).valid := fsm.io.resp.valid && fsm.io.resp.bits.source===i.U
     outArb(i).in(1).bits := fsm.io.resp.bits.resp
   }

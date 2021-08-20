@@ -103,7 +103,7 @@ class PTWFilter(Width: Int, Size: Int)(implicit p: Parameters) extends XSModule 
   io.tlb.req.map(_.ready := true.B) // NOTE: just drop un-fire reqs
   io.tlb.resp.valid := ptwResp_valid && trueHit
   io.tlb.resp.bits := ptwResp
-  io.ptw.req(0).valid := v(issPtr) && !isEmptyIss && !(ptwResp_valid && ptwResp.entry.hit(io.ptw.req(0).bits.vpn))
+  io.ptw.req(0).valid := v(issPtr) && !isEmptyIss && !(ptwResp_valid && ptwResp.entry.hit(io.ptw.req(0).bits.vpn,ptwResp.len))
   io.ptw.req(0).bits.vpn := vpn(issPtr)
   io.ptw.resp.ready := true.B
 
@@ -136,10 +136,10 @@ class PTWFilter(Width: Int, Size: Int)(implicit p: Parameters) extends XSModule 
 
   when (ptwResp_valid) {
     vpn.zip(v).map{case (pi, vi) =>
-      when (vi && ptwResp.entry.hit(pi, allType = true)) { vi := false.B }
+      when (vi && ptwResp.entry.hit(pi, ptwResp.len)) { vi := false.B }
     }
     trueHit := Cat(vpn.zip(v).map{case (pi,vi) => 
-      (vi && ptwResp.entry.hit(pi, allType = true))
+      (vi && ptwResp.entry.hit(pi, ptwResp.len))
     }).orR
   }
 
@@ -168,7 +168,7 @@ class PTWFilter(Width: Int, Size: Int)(implicit p: Parameters) extends XSModule 
     Cat((vpn ++ reqs.take(index).map(_.bits.vpn))
       .zip(v ++ reqs.take(index).map(_.valid))
       .map{case (pi, vi) => vi && pi === vpnReq}
-    ).orR || (ptwResp_valid && ptwResp.entry.hit(vpnReq))
+    ).orR || (ptwResp_valid && ptwResp.entry.hit(vpnReq, ptwResp.len))
   }
 
   def filter(tlbReq: Vec[DecoupledIO[PtwReq]]) = {

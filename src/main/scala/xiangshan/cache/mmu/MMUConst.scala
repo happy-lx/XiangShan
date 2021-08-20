@@ -36,9 +36,28 @@ trait HasTlbConst extends HasXSParameter {
   val pteResLen = XLEN - ppnLen - 2 - flagLen
   val asidLen = 16
 
+  //constants for TLB merge behavior
+  val colt_stride = 1
+  val max_merge_num = 4
+  val colt_stride_len = log2Down(colt_stride)
+
   def vaBundle = new Bundle {
     val vpn  = UInt(vpnLen.W)
     val off  = UInt(offLen.W)
+  }
+  def PtePermBundle_mergeable = new Bundle {
+    val ADbits = new Bundle {
+      val d    = Bool()
+      val a    = Bool()
+    }
+    val others = new Bundle {
+      val g    = Bool()
+      val u    = Bool()
+      val x    = Bool()
+      val w    = Bool()
+      val r    = Bool()
+      val v    = Bool()
+    }
   }
   def pteBundle = new Bundle {
     val reserved  = UInt(pteResLen.W)

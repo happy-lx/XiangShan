@@ -52,11 +52,15 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
 
   // Normal page && Super page
   val nv = RegInit(VecInit(Seq.fill(TlbEntrySize)(false.B)))
-  val nMeta = Module(new CAMTemplate(UInt(vpnLen.W), TlbEntrySize, Width + 1)).io
-  val nData = Reg(Vec(TlbEntrySize, new TlbData(false)))
+  // val nMeta = if(!EnbaleColt) (Module(new CAMTemplate(UInt(vpnLen.W), TlbEntrySize, Width + 1)).io) else (Reg(Vec(TlbEntrySize, new TlbNMMeta)))
+  val nMeta = Reg(Vec(TlbEntrySize, new TlbNMMeta))
+  // val nData = if(!EnbaleColt) Reg(Vec(TlbEntrySize, new TlbData(false))) else Reg(Vec(TlbEntrySize, new TlbData_Mergeable(false)))
+  val nData = Reg(Vec(TlbEntrySize, new TlbData_Mergeable(false)))
   val sv = RegInit(VecInit(Seq.fill(TlbSPEntrySize)(false.B)))
-  val sMeta = Reg(Vec(TlbSPEntrySize, new TlbSPMeta))
-  val sData = Reg(Vec(TlbSPEntrySize, new TlbData(true)))
+  // val sMeta = if(!EnbaleColt) Reg(Vec(TlbSPEntrySize, new TlbSPMeta)) else Reg(Vec(TlbSPEntrySize, new TlbSPMeta_Mergeable))
+  val sMeta = Reg(Vec(TlbSPEntrySize, new TlbSPMeta_Mergeable))
+  // val sData = if(!EnbaleColt) Reg(Vec(TlbSPEntrySize, new TlbData(true))) else Reg(Vec(TlbSPEntrySize, new TlbData_Mergeable(true)))
+  val sData = Reg(Vec(TlbSPEntrySize, new TlbData_Mergeable(true)))
   val v = nv ++ sv
   val data = nData ++ sData
   val g = VecInit(data.map(_.perm.g))
@@ -74,8 +78,23 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
   val nRefillIdx = replaceWrapper(nv, nReplace.way)
   val sRefillIdx = replaceWrapper(sv, sReplace.way)
 
-  nMeta.w := DontCare
-  nMeta.w.valid := false.B
+  // if(!EnbaleColt)
+  // {
+  //   nMeta.w := DontCare
+  //   nMeta.w.valid := false.B
+  // }
+  // !for debug
+  // when(refill)
+  // {
+  //   for(i <- 0 until TlbEntrySize)
+  //   {
+  //     when(nData.perm.v)
+  //     {
+  //       printf("4KB PTEs's tag: %x len: %x ppn:%x \n",nMeta(i).tag,nMeta(i).len,nData(i).ppn)
+  //     }
+  //   }
+  // }
+
   when (refill) {
     val resp = ptw.resp.bits
     when (resp.entry.level.getOrElse(0.U) === 2.U) {
@@ -83,9 +102,18 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
       refillIdx.suggestName(s"NormalRefillIdx")
 
       nv(refillIdx) := true.B
-      nMeta.w.bits.index := nRefillIdx
-      nMeta.w.bits.data  := resp.entry.tag
-      nMeta.w.valid := true.B
+      // if(!EnbaleColt)
+      // {
+      //   nMeta.w.bits.index := nRefillIdx
+      //   nMeta.w.bits.data  := resp.entry.tag
+      //   nMeta.w.valid := true.B
+      // }else
+      // {
+        nMeta(refillIdx).apply(
+          vpn = resp.entry.tag,
+          len = resp.len
+        )
+      // }
       nData(refillIdx).apply(
         ppn   = resp.entry.ppn,
         level = resp.entry.level.getOrElse(0.U),
@@ -98,16 +126,27 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
       val refillIdx = sRefillIdx
       refillIdx.suggestName(s"SuperRefillIdx")
 
+      // what's this for?
       val dup = Cat(sv.zip(sMeta).map{ case (v, m) =>
         v && m.hit(resp.entry.tag)
       }).orR // NOTE: may have long latency, RegNext it
 
       when (!dup) {
         sv(refillIdx) := true.B
-        sMeta(refillIdx).apply(
-          vpn = resp.entry.tag,
-          level = resp.entry.level.getOrElse(0.U)
-        )
+        // if(!EnbaleColt)
+        // {
+        //   sMeta(refillIdx).apply(
+        //     vpn = resp.entry.tag,
+        //     level = resp.entry.level.getOrElse(0.U)
+        //   )
+        // }else
+        // {
+          sMeta(refillIdx).apply(
+            vpn = resp.entry.tag,
+            level = resp.entry.level.getOrElse(0.U),
+            len = resp.len
+          )
+        // }
         sData(refillIdx).apply(
           ppn   = resp.entry.ppn,
           level = resp.entry.level.getOrElse(0.U),
@@ -124,21 +163,32 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
     * L1 TLB read
     */
   val sfenceVpn = sfence.bits.addr.asTypeOf(vaBundle).vpn
-  for (i <- 0 until Width) {
-    nMeta.r.req(i) := io.requestor(i).req.bits.vaddr.asTypeOf(vaBundle).vpn
-  }
-  nMeta.r.req(Width) := sfenceVpn
+  // if(!EnbaleColt)
+  // {
+  //   for (i <- 0 until Width) {
+  //     nMeta.r.req(i) := io.requestor(i).req.bits.vaddr.asTypeOf(vaBundle).vpn
+  //   }
+  //   nMeta.r.req(Width) := sfenceVpn
+  // }
 
   val nRefillMask = Mux(refill, UIntToOH(nRefillIdx)(TlbEntrySize-1, 0), 0.U).asBools
   val sRefillMask = Mux(refill, UIntToOH(sRefillIdx)(TlbSPEntrySize-1, 0), 0.U).asBools
   def TLBNormalRead(i: Int) = {
-    val entryHitVec = (
+    val entryHitVec = 
+    // if(!EnbaleColt){
+    //   if (isDtlb)
+    //     VecInit(nMeta.r.resp(i).zip(nRefillMask).map{ case (e, m) => ~m && e } ++
+    //             sMeta.zip(sRefillMask).map{ case (e,m) => ~m && e.hit(reqAddr(i).vpn) })
+    //   else
+    //     VecInit(nMeta.r.resp(i) ++ sMeta.map(_.hit(reqAddr(i).vpn/*, satp.asid*/)))
+    // }else
+    // {
       if (isDtlb)
-        VecInit(nMeta.r.resp(i).zip(nRefillMask).map{ case (e, m) => ~m && e } ++
+        VecInit(nMeta.zip(nRefillMask).map{ case (e, m) => ~m && e.hit(reqAddr(i).vpn) } ++
                 sMeta.zip(sRefillMask).map{ case (e,m) => ~m && e.hit(reqAddr(i).vpn) })
       else
-        VecInit(nMeta.r.resp(i) ++ sMeta.map(_.hit(reqAddr(i).vpn/*, satp.asid*/)))
-    )
+        VecInit(nMeta.map(_.hit(reqAddr(i).vpn)) ++ sMeta.map(_.hit(reqAddr(i).vpn/*, satp.asid*/)))
+    // }
 
     val reqAddrReg = if (isDtlb) RegNext(reqAddr(i)) else reqAddr(i)
     val cmdReg = if (isDtlb) RegNext(cmd(i)) else cmd(i)
@@ -151,7 +201,14 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
     val pfArray = ParallelOR(pfHitVec).asBool && validReg && vmEnable
     val hit     = ParallelOR(hitVec).asBool && validReg && vmEnable && ~pfArray
     val miss    = !hit && validReg && vmEnable && ~pfArray
-    val hitppn  = ParallelMux(hitVec zip data.map(_.genPPN(reqAddrReg.vpn)))
+    // if(EnbaleColt)
+    // {
+      val meta_tags = nMeta.map(_.tag) ++ sMeta.map(_.tag)
+      val hitTag =  ParallelMux(hitVec zip meta_tags)
+    // }
+    // val hitppn  = if(!EnbaleColt) ParallelMux(hitVec zip data.map(_.genPPN(reqAddrReg.vpn))) else ParallelMux(hitVec zip data.map(_.genPPN(reqAddrReg.vpn,hitTag)))
+    //TODO : optimize it , first gen hitppn then gen the right ppn with stride
+    val hitppn  = ParallelMux(hitVec zip data.map(_.genPPN(reqAddrReg.vpn,hitTag)))
     val hitPerm = ParallelMux(hitVec zip data.map(_.perm))
 
     // check for TLB multi-hit
@@ -226,6 +283,8 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
   val hitVecVec = readResult.map(res => res._3)
   val validRegVec = readResult.map(res => res._4)
 
+  // 这个地方可能是有问题的，vpn对itlb应该是不需要存一拍的，导致多命中问题的原因
+  // 然后如果l2返回的PTE是不合并的话，与PTW合并的PTE是否会存在冲突的情况？
   for (i <- 0 until Width) {
     io.ptw.req(i).valid := validRegVec(i) && missVec(i) && !RegNext(refill)
     if(isDtlb)
@@ -242,7 +301,11 @@ class TLB(Width: Int, isDtlb: Boolean)(implicit p: Parameters) extends TlbModule
   // }
 
   // sfence (flush)
-  val sfenceHit = nMeta.r.resp(Width) ++ sMeta.map(_.hit(sfenceVpn))
+  val sfenceHit = 
+  //                    if(!EnbaleColt)
+  //                   {nMeta.r.resp(Width) ++ sMeta.map(_.hit(sfenceVpn))}
+  //                 else 
+                    {nMeta.map(_.hit(sfenceVpn)) ++ sMeta.map(_.hit(sfenceVpn))}
   when (sfence.valid) {
     when (sfence.bits.rs1) { // virtual address *.rs1 <- (rs1===0.U)
       when (sfence.bits.rs2) { // asid, but i do not want to support asid, *.rs2 <- (rs2===0.U)

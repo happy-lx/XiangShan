@@ -47,6 +47,7 @@ class PtwCacheIO()(implicit p: Parameters) extends PtwBundle {
       val ppn = UInt(ppnLen.W)
     }
     val toTlb = new PtwEntry(tagLen = vpnLen, hasPerm = true, hasLevel = true)
+    val len = UInt(log2Ceil(max_merge_num).W)
   })
   val refill = Flipped(ValidIO(new Bundle {
     val ptes = UInt(MemBandWidth.W)
@@ -58,7 +59,7 @@ class PtwCacheIO()(implicit p: Parameters) extends PtwBundle {
   val refuseRefill = Input(Bool())
 }
 
-class PtwCache()(implicit p: Parameters) extends XSModule with HasPtwConst {
+class PtwCache()(implicit p: Parameters) extends XSModule with HasPtwConst with HasColtUtils{
   val io = IO(new PtwCacheIO)
 
   // TODO: four caches make the codes dirty, think about how to deal with it
@@ -252,6 +253,8 @@ class PtwCache()(implicit p: Parameters) extends XSModule with HasPtwConst {
   val resp = Wire(io.resp.bits.cloneType)
   val resp_latch = RegEnable(resp, io.resp.valid && !io.resp.ready)
   val resp_latch_valid = ValidHold(io.resp.valid && !io.resp.ready, io.resp.ready, sfence.valid)
+  // for tlb merge of 4KB PTEs
+  val isMergeable = l3Hit && ColtCanMerge_L2(l3HitData)
   second_ready := !(second_valid || resp_latch_valid) || io.resp.fire()
   resp.source   := second_req.source
   resp.vpn      := second_req.vpn
@@ -260,10 +263,36 @@ class PtwCache()(implicit p: Parameters) extends XSModule with HasPtwConst {
   resp.toFsm.l1Hit := l1Hit
   resp.toFsm.l2Hit := l2Hit
   resp.toFsm.ppn   := Mux(l2Hit, l2HitPPN, l1HitPPN)
-  resp.toTlb.tag   := second_req.vpn
-  resp.toTlb.ppn   := Mux(l3Hit, l3HitPPN, spHitData.ppn)
-  resp.toTlb.perm.map(_ := Mux(l3Hit, l3HitPerm, spHitPerm))
+  // need to check carefully
+  resp.toTlb.tag   := Mux(isMergeable,second_req.vpn - genPtwL3SectorIdx(second_req.vpn),second_req.vpn) 
+  resp.toTlb.ppn   := Mux(l3Hit, Mux(isMergeable,l3HitData.ppns(0),l3HitPPN), spHitData.ppn)
+  // resp.toTlb.perm.map(_ := Mux(l3Hit, l3HitPerm, spHitPerm))
+  resp.toTlb.perm.map(perm => {
+    when(l3Hit)
+    {
+        perm.g := l3HitPerm.g
+        perm.u := l3HitPerm.u
+        perm.x := l3HitPerm.x
+        perm.w := l3HitPerm.w
+        perm.r := l3HitPerm.r
+      when(isMergeable)
+      {
+        val hitperms = l3HitData.perms.getOrElse(0.U.asTypeOf(Vec(PtwL3SectorSize, new PtePermBundle)))
+        perm.d := Cat(hitperms.map(_.d)).andR
+        perm.a := Cat(hitperms.map(_.a)).andR
+      }.otherwise
+      {
+        perm.d := l3HitPerm.d
+        perm.a := l3HitPerm.a
+      }
+    }.otherwise
+    {
+      perm := spHitPerm
+    }
+  })
   resp.toTlb.level.map(_ := Mux(l3Hit, 2.U, spHitLevel))
+  //no need to merge when hit in L2 TLB , only the ptes from PTW need to be merged 
+  resp.len         := Mux(isMergeable,3.U,0.U)
 
   io.resp.valid := second_valid
   io.resp.bits := Mux(resp_latch_valid, resp_latch, resp)
