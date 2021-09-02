@@ -291,12 +291,13 @@ class PtwCache()(implicit p: Parameters) extends XSModule with HasPtwConst with 
     }
   })
   resp.toTlb.level.map(_ := Mux(l3Hit, 2.U, spHitLevel))
-  //no need to merge when hit in L2 TLB , only the ptes from PTW need to be merged 
   resp.len         := Mux(isMergeable,3.U,0.U)
 
   io.resp.valid := second_valid
   io.resp.bits := Mux(resp_latch_valid, resp_latch, resp)
   assert(!(l3Hit && spHit), "normal page and super page both hit")
+
+  XSPerfAccumulate("4K_merge_count_tlb", second_valid && isMergeable)
 
   // refill Perf
   val l1RefillPerf = Wire(Vec(PtwL1EntrySize, Bool()))

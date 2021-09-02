@@ -143,6 +143,16 @@ class PTWFilter(Width: Int, Size: Int)(implicit p: Parameters) extends XSModule 
     }).orR
   }
 
+  val FilterHitPerf = WireInit(VecInit(Seq.fill(Size)(false.B))) 
+
+  for( i <- 0 until Size)
+  {
+    FilterHitPerf(i) := ptwResp_valid && v(i) && ptwResp.entry.hit(vpn(i),ptwResp.len) && ptwResp.len =/= 0.U
+  }
+
+
+  XSPerfAccumulate("mergeable_pte_filter_hit_nums", PopCount(FilterHitPerf))
+
   counter := counter - do_deq + Mux(do_enq, enqNum, 0.U)
   assert(counter <= Size.U, "counter should be less than Size")
   when (counter === 0.U) {
