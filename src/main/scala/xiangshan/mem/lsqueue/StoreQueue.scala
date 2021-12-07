@@ -132,6 +132,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   // deqPtrExtNext and deqPtrExtNext+1 entry will be read from dataModule
   // if !sbuffer.fire(), read the same ptr
   // if sbuffer.fire(), read next
+  // 出队：如果给sbuffer写下去了，就可以deq了
   val deqPtrExtNext = WireInit(Mux(io.sbuffer(1).fire(),
     VecInit(deqPtrExt.map(_ + 2.U)),
     Mux(io.sbuffer(0).fire() || io.mmioStout.fire(),

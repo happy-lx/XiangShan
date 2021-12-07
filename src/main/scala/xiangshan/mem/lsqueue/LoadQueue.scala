@@ -235,6 +235,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
 
   // Refill 64 bit in a cycle
   // Refill data comes back from io.dcache.resp
+  // 好像是refill cache miss的东西
   dataModule.io.refill.valid := io.dcache.valid
   dataModule.io.refill.paddr := io.dcache.bits.addr
   dataModule.io.refill.data := io.dcache.bits.data
