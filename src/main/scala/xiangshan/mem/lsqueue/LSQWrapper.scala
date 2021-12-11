@@ -58,6 +58,8 @@ class LsqWrappper(implicit p: Parameters) extends XSModule with HasDCacheParamet
     val enq = new LsqEnqIO
     val brqRedirect = Flipped(ValidIO(new Redirect))
     val loadIn = Vec(LoadPipelineWidth, Flipped(Valid(new LsPipelineBundle)))
+    val rsStoreIn = Vec(StorePipelineWidth, Flipped(Decoupled(new LsPipelineBundle))) 
+    val storeOut = Vec(StorePipelineWidth, Decoupled(new LsPipelineBundle))
     val storeIn = Vec(StorePipelineWidth, Flipped(Valid(new LsPipelineBundle)))
     val storeInRe = Vec(StorePipelineWidth, Input(new LsPipelineBundle()))
     val storeDataIn = Vec(StorePipelineWidth, Flipped(Valid(new StoreDataBundle))) // store data, send to sq from rs
@@ -122,6 +124,8 @@ class LsqWrappper(implicit p: Parameters) extends XSModule with HasDCacheParamet
   // store queue wiring
   // storeQueue.io <> DontCare
   storeQueue.io.brqRedirect <> io.brqRedirect
+  storeQueue.io.rsStoreIn <> io.rsStoreIn
+  storeQueue.io.storeOut <> io.storeOut
   storeQueue.io.storeIn <> io.storeIn
   storeQueue.io.storeInRe <> io.storeInRe
   storeQueue.io.storeDataIn <> io.storeDataIn

@@ -18,3 +18,5 @@ sq要能选择出 StorePipelineWidth 个重发的store，和 rs 可能发的 Sto
 rs一条store只会发一次，所以永远是rs发的store优先级高，一旦这条store TLB MISS就由sq来重发，sq重发的store不能一直在sq中发出请求，一旦选择了它，它就需要过一些周期才能再次发出请求，之后TLB会反馈这个信息，如果TLB命中则不需要重发了，如果TLB miss需要以一定策略等待一些周期再重发。
 
 所以基本上只需要加上一个流水级让sq进行仲裁，让sq有仲裁的能力，让sq有每一个store地址转换成功与否等信息让它能选择性重发即可。
+
+让sq加一个地址是不是virtual就可以进行retry选择了，用boom的AgePriorityEncoder去选最老的一个可以retry的store，但是注意要选出StorePipelineWidth个。

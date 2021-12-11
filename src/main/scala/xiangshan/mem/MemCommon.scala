@@ -71,6 +71,9 @@ class LsPipelineBundle(implicit p: Parameters) extends XSBundle {
 
   // For debug usage
   val isFirstIssue = Bool()
+
+  // for store retry
+  val isStoreRetry = Bool()
 }
 
 class StoreDataBundle(implicit p: Parameters) extends XSBundle {
@@ -145,4 +148,19 @@ class LoadViolationQueryIO(implicit p: Parameters) extends XSBundle {
 class MemWaitUpdateReq(implicit p: Parameters) extends XSBundle {
   val staIssue = Vec(exuParameters.StuCnt, ValidIO(new ExuInput))
   val stdIssue = Vec(exuParameters.StuCnt, ValidIO(new ExuInput))
+}
+
+/**
+ * Object to return the lowest bit position after the head.
+ */
+object AgePriorityEncoder
+{
+  def apply(in: Seq[Bool], head: UInt): UInt = {
+    val n = in.size
+    val width = log2Ceil(in.size)
+    val n_padded = 1 << width
+    val temp_vec = (0 until n_padded).map(i => if (i < n) in(i) && i.U >= head else false.B) ++ in
+    val idx = PriorityEncoder(temp_vec)
+    idx(width-1, 0) //discard msb
+  }
 }

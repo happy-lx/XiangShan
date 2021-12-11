@@ -55,6 +55,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val io = IO(new Bundle() {
     val enq = new SqEnqIO
     val brqRedirect = Flipped(ValidIO(new Redirect))
+    val rsStoreIn = Vec(StorePipelineWidth, Flipped(Decoupled(new LsPipelineBundle))) // store addr from rs
+    val storeOut = Vec(StorePipelineWidth, Decoupled(new LsPipelineBundle)) // select inq(rs or sq) to TLB
     val storeIn = Vec(StorePipelineWidth, Flipped(Valid(new LsPipelineBundle))) // store addr, data is not included
     val storeInRe = Vec(StorePipelineWidth, Input(new LsPipelineBundle())) // store more mmio and exception
     val storeDataIn = Vec(StorePipelineWidth, Flipped(Valid(new StoreDataBundle))) // store data, send to sq from rs
@@ -93,9 +95,10 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val vaddrModule = Module(new SQAddrModule(
     dataWidth = VAddrBits,
     numEntries = StoreQueueSize,
-    numRead = StorePipelineWidth + 1, // sbuffer 2 + badvaddr 1 (TODO)
+    numRead = StorePipelineWidth + 2, // sbuffer 2 + badvaddr 1 + retry vaddr (TODO)
     numWrite = StorePipelineWidth,
-    numForward = StorePipelineWidth
+    numForward = StorePipelineWidth,
+    lastReadAsy = true
   ))
   vaddrModule.io := DontCare
   val debug_paddr = Reg(Vec(StoreQueueSize, UInt((PAddrBits).W)))
@@ -105,8 +108,9 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   // state & misc
   val allocated = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // sq entry has been allocated
   val addrvalid = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // non-mmio addr is valid
+  val ispyhsical = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // addr is pyhsical
   val datavalid = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // non-mmio data is valid
-  val allvalid  = VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && datavalid(i))) // non-mmio data & addr is valid
+  val allvalid  = VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && datavalid(i) && ispyhsical(i))) // non-mmio data & addr is valid
   val commited = Reg(Vec(StoreQueueSize, Bool())) // inst has been commited by rob
   val pending = Reg(Vec(StoreQueueSize, Bool())) // mmio pending: inst is an mmio inst, it will not be executed until it reachs the end of rob
   val mmio = Reg(Vec(StoreQueueSize, Bool())) // mmio: inst is an mmio inst
@@ -127,6 +131,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val enqMask = UIntToMask(enqPtr, StoreQueueSize)
 
   val commitCount = RegNext(io.rob.scommit)
+
+  val st_retry_idx = WireInit(0.U(log2Ceil(StoreQueueSize).W))
 
   // Read dataModule
   // deqPtrExtNext and deqPtrExtNext+1 entry will be read from dataModule
@@ -149,6 +155,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   // no inst will be commited 1 cycle before tval update
   vaddrModule.io.raddr(StorePipelineWidth) := (cmtPtrExt(0) + commitCount).value
 
+  vaddrModule.io.raddr(StorePipelineWidth + 1) := st_retry_idx
+
   /**
     * Enqueue at dispatch
     *
@@ -164,8 +172,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
       allocated(index) := true.B
       datavalid(index) := false.B
       addrvalid(index) := false.B
+      ispyhsical(index) := false.B
       commited(index) := false.B
       pending(index) := false.B
+      // NOTE: the index will be used when retry
+      uop(index).sqIdx := sqIdx
     }
     io.enq.resp(i) := sqIdx
   }
@@ -179,7 +190,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   require(IssuePtrMoveStride >= 2)
 
   val issueLookupVec = (0 until IssuePtrMoveStride).map(issuePtrExt + _.U)
-  val issueLookup = issueLookupVec.map(ptr => allocated(ptr.value) && addrvalid(ptr.value) && datavalid(ptr.value) && ptr =/= enqPtrExt(0))
+  val issueLookup = issueLookupVec.map(ptr => allocated(ptr.value) && addrvalid(ptr.value) && ispyhsical(ptr.value) && datavalid(ptr.value) && ptr =/= enqPtrExt(0))
   val nextIssuePtr = issuePtrExt + PriorityEncoder(VecInit(issueLookup.map(!_) :+ true.B))
   issuePtrExt := nextIssuePtr
 
@@ -216,7 +227,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     val stWbIndex = io.storeIn(i).bits.uop.sqIdx.value
     when (io.storeIn(i).fire()) {
       val addr_valid = !io.storeIn(i).bits.miss
-      addrvalid(stWbIndex) := addr_valid //!io.storeIn(i).bits.mmio
+      ispyhsical(stWbIndex) := addr_valid //!io.storeIn(i).bits.mmio
       // pending(stWbIndex) := io.storeIn(i).bits.mmio
 
       dataModule.io.mask.waddr(i) := stWbIndex
@@ -227,11 +238,6 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
       paddrModule.io.wdata(i) := io.storeIn(i).bits.paddr
       paddrModule.io.wlineflag(i) := io.storeIn(i).bits.wlineflag
       paddrModule.io.wen(i) := addr_valid
-
-      vaddrModule.io.waddr(i) := stWbIndex
-      vaddrModule.io.wdata(i) := io.storeIn(i).bits.vaddr
-      vaddrModule.io.wlineflag(i) := io.storeIn(i).bits.wlineflag
-      vaddrModule.io.wen(i) := addr_valid
 
       debug_paddr(paddrModule.io.waddr(i)) := paddrModule.io.wdata(i)
 
@@ -246,6 +252,16 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
         io.storeIn(i).bits.paddr,
         io.storeIn(i).bits.mmio
       )
+    }
+    when (io.rsStoreIn(i).fire()) {
+      val rsStWbIndex = io.rsStoreIn(i).bits.uop.sqIdx.value
+
+      addrvalid(rsStWbIndex) := true.B
+
+      vaddrModule.io.waddr(i) := rsStWbIndex
+      vaddrModule.io.wdata(i) := io.rsStoreIn(i).bits.vaddr
+      vaddrModule.io.wlineflag(i) := io.rsStoreIn(i).bits.wlineflag
+      vaddrModule.io.wen(i) := true.B
     }
 
     // re-replinish mmio, for pma/pmp will get mmio one cycle later
@@ -291,6 +307,61 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     }
   }
 
+
+  // select logic 
+
+  val s0_block_store_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>false.B)))
+  val s1_block_store_mask = RegNext(s0_block_store_mask)
+  val s2_block_store_mask = RegNext(s1_block_store_mask)
+
+  st_retry_idx := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
+    val blocked = s1_block_store_mask(i) || s2_block_store_mask(i)
+    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked
+  }), deqPtr)
+
+  val retry_fired = WireInit(false.B)
+
+  when(retry_fired) {
+    s0_block_store_mask(st_retry_idx) := true.B
+  }
+
+  for(i <- 0 until StorePipelineWidth) {
+    io.storeOut(i) <> io.rsStoreIn(i)
+
+    if(i == (StorePipelineWidth - 1)){
+      val blocked = s1_block_store_mask(st_retry_idx) || s2_block_store_mask(st_retry_idx)
+      val canfire_retry = allocated(st_retry_idx) && addrvalid(st_retry_idx) && !ispyhsical(st_retry_idx) && !blocked
+      when(!io.rsStoreIn(i).valid && canfire_retry && io.storeOut(i).ready) {
+
+        val addrAligned = LookupTree(uop(st_retry_idx).ctrl.fuOpType(1,0), List(
+          "b00".U   -> true.B,              //b
+          "b01".U   -> (io.storeOut(i).bits.vaddr(0) === 0.U),   //h
+          "b10".U   -> (io.storeOut(i).bits.vaddr(1,0) === 0.U), //w
+          "b11".U   -> (io.storeOut(i).bits.vaddr(2,0) === 0.U)  //d
+        ))
+
+        retry_fired := true.B
+        io.storeOut(i).valid := true.B
+        io.storeOut(i).bits.isStoreRetry := true.B
+        // should we save uop when rs issues ?
+        io.storeOut(i).bits.uop := uop(st_retry_idx)
+        io.storeOut(i).bits.vaddr := vaddrModule.io.rdata(StorePipelineWidth + 1)
+        io.storeOut(i).bits.mask := genWmask(vaddrModule.io.rdata(StorePipelineWidth + 1), uop(st_retry_idx).ctrl.fuOpType(1,0))
+        io.storeOut(i).bits.wlineflag := uop(st_retry_idx).ctrl.fuOpType === LSUOpType.cbo_zero
+        io.storeOut(i).bits.uop.cf.exceptionVec(storeAddrMisaligned) := !addrAligned
+        io.storeOut(i).bits.rsIdx := DontCare
+      }
+    }
+
+    when(io.rsStoreIn(i).valid){
+      s0_block_store_mask(io.rsStoreIn(i).bits.uop.sqIdx.value) := true.B
+    }
+  }
+
+  XSPerfAccumulate("store_retry", retry_fired)
+
+  
+
   /**
     * load forward query
     *
@@ -308,9 +379,9 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     val differentFlag = deqPtrExt(0).flag =/= io.forward(i).sqIdx.flag
     val forwardMask = io.forward(i).sqIdxMask
     // all addrvalid terms need to be checked
-    val addrValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && allocated(i))))
+    val addrValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && ispyhsical(i) && allocated(i))))
     val dataValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => datavalid(i))))
-    val allValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && datavalid(i) && allocated(i))))
+    val allValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && ispyhsical(i) && datavalid(i) && allocated(i))))
     val canForward1 = Mux(differentFlag, ~deqMask, deqMask ^ forwardMask) & allValidVec.asUInt
     val canForward2 = Mux(differentFlag, forwardMask, 0.U(StoreQueueSize.W)) & allValidVec.asUInt
     val needForward = Mux(differentFlag, ~deqMask | forwardMask, deqMask ^ forwardMask)
@@ -377,7 +448,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val uncacheState = RegInit(s_idle)
   switch(uncacheState) {
     is(s_idle) {
-      when(io.rob.pendingst && pending(deqPtr) && allocated(deqPtr) && datavalid(deqPtr) && addrvalid(deqPtr)) {
+      when(io.rob.pendingst && pending(deqPtr) && allocated(deqPtr) && datavalid(deqPtr) && addrvalid(deqPtr) && ispyhsical(deqPtr)) {
         uncacheState := s_req
       }
     }

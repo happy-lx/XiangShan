@@ -29,7 +29,7 @@ import xiangshan.backend.rob.RobPtr
 
 // Data module define
 // These data modules are like SyncDataModuleTemplate, but support cam-like ops
-class SQAddrModule(dataWidth: Int, numEntries: Int, numRead: Int, numWrite: Int, numForward: Int)(implicit p: Parameters) extends XSModule with HasDCacheParameters {
+class SQAddrModule(dataWidth: Int, numEntries: Int, numRead: Int, numWrite: Int, numForward: Int, lastReadAsy: Boolean = false)(implicit p: Parameters) extends XSModule with HasDCacheParameters {
   val io = IO(new Bundle {
     val raddr = Input(Vec(numRead, UInt(log2Up(numEntries).W)))
     val rdata = Output(Vec(numRead, UInt(dataWidth.W)))
@@ -50,8 +50,14 @@ class SQAddrModule(dataWidth: Int, numEntries: Int, numRead: Int, numWrite: Int,
 
   // read ports
   for (i <- 0 until numRead) {
-    io.rdata(i) := data(RegNext(io.raddr(i)))
-    io.rlineflag(i) := lineflag(RegNext(io.raddr(i)))
+    if(i == (numRead - 1) && lastReadAsy) {
+      // last port of READ , let it valid this cycle
+      io.rdata(i) := data(io.raddr(i))
+      io.rlineflag(i) := lineflag(io.raddr(i))
+    }else {
+      io.rdata(i) := data(RegNext(io.raddr(i)))
+      io.rlineflag(i) := lineflag(RegNext(io.raddr(i)))
+    }
   }
 
   // below is the write ports (with priorities)
