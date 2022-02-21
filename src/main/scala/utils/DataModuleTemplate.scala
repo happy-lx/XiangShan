@@ -51,7 +51,7 @@ class RawDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, nu
 class SyncRawDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int) extends RawDataModuleTemplate(gen, numEntries, numRead, numWrite, true)
 class AsyncRawDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int) extends RawDataModuleTemplate(gen, numEntries, numRead, numWrite, false)
 
-class DataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int, isSync: Boolean) extends Module {
+class DataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int, isSync: Boolean, lastReadAsy: Boolean) extends Module {
   val io = IO(new Bundle {
     val raddr = Vec(numRead,  Input(UInt(log2Up(numEntries).W)))
     val rdata = Vec(numRead,  Output(gen))
@@ -66,6 +66,9 @@ class DataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWr
   val raddr = if (isSync) (RegNext(io.raddr)) else io.raddr
   for (i <- 0 until numRead) {
     io.rdata(i) := data(raddr(i))
+    if(i == (numRead - 1) && lastReadAsy){
+      io.rdata(i) := data(io.raddr(i))
+    }
   }
 
   // below is the write ports (with priorities)
@@ -83,8 +86,8 @@ class DataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWr
   }
 }
 
-class SyncDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int) extends DataModuleTemplate(gen, numEntries, numRead, numWrite, true)
-class AsyncDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int) extends DataModuleTemplate(gen, numEntries, numRead, numWrite, false)
+class SyncDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int, lastReadAsy: Boolean = false) extends DataModuleTemplate(gen, numEntries, numRead, numWrite, true, lastReadAsy)
+class AsyncDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, numWrite: Int) extends DataModuleTemplate(gen, numEntries, numRead, numWrite, false, true)
 
 class Folded1WDataModuleTemplate[T <: Data](gen: T, numEntries: Int, numRead: Int, isSync: Boolean, width: Int) extends Module {
   val io = IO(new Bundle {

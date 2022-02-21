@@ -74,6 +74,9 @@ class LsPipelineBundle(implicit p: Parameters) extends XSBundle {
 
   // for store retry
   val isStoreRetry = Bool()
+
+  // for load retry
+  val isLoadRetry = Bool()
 }
 
 class StoreDataBundle(implicit p: Parameters) extends XSBundle {
