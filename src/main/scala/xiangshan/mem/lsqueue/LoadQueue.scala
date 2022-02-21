@@ -134,6 +134,24 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   val cache_no_replay = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
   val forward_data_valid = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
 
+ /**
+   * used for re-select control
+   */
+
+  val credit = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(ReSelectLen.W))))
+  val block_ptr = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
+  val block_cycles = RegInit(VecInit(Seq(2.U(ReSelectLen.W), 8.U(ReSelectLen.W), 16.U(ReSelectLen.W), 31.U(ReSelectLen.W))))
+  val sel_blocked = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
+
+  val creditUpdate = WireInit(VecInit(List.fill(LoadQueueSize)(0.U(ReSelectLen.W))))
+
+  credit := creditUpdate
+
+  (0 until LoadQueueSize).map(i => {
+    creditUpdate(i) := Mux(credit(i) > 0.U(ReSelectLen.W), credit(i) - 1.U(ReSelectLen.W), credit(i))
+    sel_blocked(i) := creditUpdate(i) =/= 0.U(ReSelectLen.W) || credit(i) =/= 0.U(ReSelectLen.W)
+  })
+
   val debug_mmio = Reg(Vec(LoadQueueSize, Bool())) // mmio: inst is an mmio inst
   val debug_paddr = Reg(Vec(LoadQueueSize, UInt(PAddrBits.W))) // mmio: inst is an mmio inst
 
@@ -195,7 +213,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   val s2_block_load_mask = RegNext(s1_block_load_mask)
 
   ld_retry_idx := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
-    val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) 
+    val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i)
     allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i))
   }), deqPtr)
 
@@ -211,7 +229,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     io.loadOut(i) <> io.rsLoadIn(i)
 
     if(i == (LoadPipelineWidth - 1)){
-      val blocked = s1_block_load_mask(ld_retry_idx) || s2_block_load_mask(ld_retry_idx) 
+      val blocked = s1_block_load_mask(ld_retry_idx) || s2_block_load_mask(ld_retry_idx) || sel_blocked(i)
       val canfire_retry = allocated(ld_retry_idx) && !blocked && (!tlb_hited(ld_retry_idx) || !ld_ld_check_ok(ld_retry_idx) || !cache_bank_no_conflict(ld_retry_idx) || !cache_no_replay(ld_retry_idx) || !forward_data_valid(ld_retry_idx))
       when(!io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
 
@@ -346,17 +364,29 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       */
     when(io.retryFast(i).valid){
       val idx = io.retryFast(i).ld_idx
+      val needretry = !io.retryFast(i).ld_ld_check_ok || !io.retryFast(i).cache_bank_no_conflict
       
       ld_ld_check_ok(idx) := io.retryFast(i).ld_ld_check_ok
       cache_bank_no_conflict(idx) := io.retryFast(i).cache_bank_no_conflict
+
+      when(needretry) {
+        creditUpdate(idx) := block_cycles(block_ptr(idx))
+        block_ptr(idx) := Mux(block_ptr(idx) === 3.U(2.W), block_ptr(idx), block_ptr(idx) + 1.U(2.W))
+      }
     }
 
     when(io.retrySlow(i).valid){
       val idx = io.retrySlow(i).ld_idx
+      val needretry = !io.retrySlow(i).tlb_hited || !io.retrySlow(i).cache_no_replay || !io.retrySlow(i).forward_data_valid
 
       tlb_hited(idx) := io.retrySlow(i).tlb_hited
       cache_no_replay(idx) := io.retrySlow(i).cache_no_replay
       forward_data_valid(idx) := io.retrySlow(i).forward_data_valid
+
+      when(needretry) {
+        creditUpdate(idx) := block_cycles(block_ptr(idx))
+        block_ptr(idx) := Mux(block_ptr(idx) === 3.U(2.W), block_ptr(idx), block_ptr(idx) + 1.U(2.W))
+      }
     }
     // vaddrModule write is delayed, as vaddrModule will not be read right after write
     // vaddrModule.io.waddr(i) := RegNext(loadWbIndex)
