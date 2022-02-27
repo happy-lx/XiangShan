@@ -134,6 +134,21 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
   val st_retry_idx = WireInit(0.U(log2Ceil(StoreQueueSize).W))
 
+  // used to delay tlb-missed store's re-selecting  
+  val block_ptr = RegInit(VecInit(List.fill(StoreQueueSize)(0.U(2.W))))
+  val block_cycles = RegInit(VecInit(Seq(4.U(ReSelectLen.W), 8.U(ReSelectLen.W), 10.U(ReSelectLen.W), 10.U(ReSelectLen.W))))
+
+  val credit = RegInit(VecInit(List.fill(StoreQueueSize)(0.U(ReSelectLen.W))))
+  val creditUpdate = WireInit(VecInit(List.fill(StoreQueueSize)(0.U(ReSelectLen.W))))
+  val sel_blocked = RegInit(VecInit(List.fill(StoreQueueSize)(false.B)))
+
+  credit := creditUpdate
+
+  (0 until StoreQueueSize).map(i => {
+    creditUpdate(i) := Mux(credit(i) > 0.U(ReSelectLen.W), credit(i) - 1.U(ReSelectLen.W), credit(i))
+    sel_blocked(i) := creditUpdate(i) =/= 0.U(ReSelectLen.W) || credit(i) =/= 0.U(ReSelectLen.W)
+  })
+
   // Read dataModule
   // deqPtrExtNext and deqPtrExtNext+1 entry will be read from dataModule
   // if !sbuffer.fire(), read the same ptr
@@ -177,6 +192,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
       pending(index) := false.B
       // NOTE: the index will be used when retry
       uop(index).sqIdx := sqIdx
+      block_ptr(index) := 0.U(2.W)
     }
     io.enq.resp(i) := sqIdx
   }
@@ -229,6 +245,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
       val addr_valid = !io.storeIn(i).bits.miss
       ispyhsical(stWbIndex) := addr_valid //!io.storeIn(i).bits.mmio
       // pending(stWbIndex) := io.storeIn(i).bits.mmio
+
+      when(!addr_valid) {
+        creditUpdate(stWbIndex) := block_cycles(block_ptr(stWbIndex))
+        block_ptr(stWbIndex) := Mux(block_ptr(stWbIndex) === 3.U(2.W), block_ptr(stWbIndex), block_ptr(stWbIndex) + 1.U(2.W))
+      }
 
       dataModule.io.mask.waddr(i) := stWbIndex
       dataModule.io.mask.wdata(i) := io.storeIn(i).bits.mask
@@ -315,7 +336,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val s2_block_store_mask = RegNext(s1_block_store_mask)
 
   st_retry_idx := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
-    val blocked = s1_block_store_mask(i) || s2_block_store_mask(i)
+    val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
     allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked
   }), deqPtr)
 
@@ -329,7 +350,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     io.storeOut(i) <> io.rsStoreIn(i)
 
     if(i == (StorePipelineWidth - 1)){
-      val blocked = s1_block_store_mask(st_retry_idx) || s2_block_store_mask(st_retry_idx)
+      val blocked = s1_block_store_mask(st_retry_idx) || s2_block_store_mask(st_retry_idx) || sel_blocked(i)
       val canfire_retry = allocated(st_retry_idx) && addrvalid(st_retry_idx) && !ispyhsical(st_retry_idx) && !blocked
       when(!io.rsStoreIn(i).valid && canfire_retry && io.storeOut(i).ready) {
 

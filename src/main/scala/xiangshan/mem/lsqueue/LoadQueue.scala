@@ -139,8 +139,17 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    */
 
   val credit = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(ReSelectLen.W))))
-  val block_ptr = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
-  val block_cycles = RegInit(VecInit(Seq(2.U(ReSelectLen.W), 8.U(ReSelectLen.W), 16.U(ReSelectLen.W), 31.U(ReSelectLen.W))))
+  
+  // ptrs to control which cycle to choose
+  val block_ptr_tlb = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
+  val block_ptr_datainvalid = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
+  val block_ptr_others = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
+
+  // specific cycles to block
+  val block_cycles_tlb = RegInit(VecInit(Seq(4.U(ReSelectLen.W), 8.U(ReSelectLen.W), 10.U(ReSelectLen.W), 10.U(ReSelectLen.W))))
+  val block_cycles_datainvalid = RegInit(VecInit(Seq(8.U(ReSelectLen.W), 8.U(ReSelectLen.W), 10.U(ReSelectLen.W), 10.U(ReSelectLen.W))))
+  val block_cycles_others = RegInit(VecInit(Seq(0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 1.U(ReSelectLen.W), 2.U(ReSelectLen.W))))
+
   val sel_blocked = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
 
   val creditUpdate = WireInit(VecInit(List.fill(LoadQueueSize)(0.U(ReSelectLen.W))))
@@ -198,6 +207,13 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       cache_bank_no_conflict(index) := true.B
       cache_no_replay(index) := true.B
       forward_data_valid(index) := true.B
+
+    /**
+      * used for delaying load(block-ptr to control how many cycles to block)
+      */
+      block_ptr_tlb(index) := 0.U(2.W)
+      block_ptr_datainvalid(index) := 0.U(2.W)
+      block_ptr_others(index) := 0.U(2.W)
 
     }
     io.enq.resp(i) := lqIdx
@@ -370,8 +386,8 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       cache_bank_no_conflict(idx) := io.retryFast(i).cache_bank_no_conflict
 
       when(needretry) {
-        creditUpdate(idx) := block_cycles(block_ptr(idx))
-        block_ptr(idx) := Mux(block_ptr(idx) === 3.U(2.W), block_ptr(idx), block_ptr(idx) + 1.U(2.W))
+        creditUpdate(idx) := block_cycles_others(block_ptr_others(idx))
+        block_ptr_others(idx) := Mux(block_ptr_others(idx) === 3.U(2.W), block_ptr_others(idx), block_ptr_others(idx) + 1.U(2.W))
       }
     }
 
@@ -384,8 +400,14 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       forward_data_valid(idx) := io.retrySlow(i).forward_data_valid
 
       when(needretry) {
-        creditUpdate(idx) := block_cycles(block_ptr(idx))
-        block_ptr(idx) := Mux(block_ptr(idx) === 3.U(2.W), block_ptr(idx), block_ptr(idx) + 1.U(2.W))
+        creditUpdate(idx) := Mux( !io.retrySlow(i).tlb_hited, block_cycles_tlb(block_ptr_tlb(idx)), Mux(!io.retrySlow(i).cache_no_replay, block_cycles_others(block_ptr_others(idx)), block_cycles_datainvalid(block_ptr_datainvalid(idx))))
+        when(!io.retrySlow(i).tlb_hited) {
+          block_ptr_tlb(idx) := Mux(block_ptr_tlb(idx) === 3.U(2.W), block_ptr_tlb(idx), block_ptr_tlb(idx) + 1.U(2.W))
+        }.elsewhen(!io.retrySlow(i).cache_no_replay) {
+          block_ptr_others(idx) := Mux(block_ptr_others(idx) === 3.U(2.W), block_ptr_others(idx), block_ptr_others(idx) + 1.U(2.W))
+        }.otherwise {
+          block_ptr_datainvalid(idx) := Mux(block_ptr_datainvalid(idx) === 3.U(2.W), block_ptr_datainvalid(idx), block_ptr_datainvalid(idx) + 1.U(2.W))
+        }
       }
     }
     // vaddrModule write is delayed, as vaddrModule will not be read right after write
