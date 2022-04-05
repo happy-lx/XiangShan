@@ -89,6 +89,8 @@ class LsqWrappper(implicit p: Parameters) extends XSModule with HasDCacheParamet
   val loadQueue = Module(new LoadQueue)
   val storeQueue = Module(new StoreQueue)
 
+  loadQueue.io.storeDataValidVec := storeQueue.io.storeDataValidVec
+
   // io.enq logic
   // LSQ: send out canAccept when both load queue and store queue are ready
   // Dispatch: send instructions to LSQ only when they are ready

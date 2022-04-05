@@ -39,6 +39,7 @@ class LoadToLsqSlowIO(implicit p: Parameters) extends XSBundle {
   val cache_no_replay = Output(Bool())
   val forward_data_valid = Output(Bool())
   val ld_idx = Output(UInt(log2Ceil(LoadQueueSize).W))
+  val data_invalid_sq_idx = Output(UInt(log2Ceil(StoreQueueSize).W))
 }
 
 class LoadToLsqIO(implicit p: Parameters) extends XSBundle {
@@ -458,6 +459,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule with HasLoadHelper {
   io.retrySlow.cache_no_replay := Mux(io.in.bits.isSoftPrefetch, (!s2_cache_replay || s2_mmio || s2_exception), (!s2_cache_replay || s2_mmio || s2_exception || fullForward))
   io.retrySlow.forward_data_valid := Mux(io.in.bits.isSoftPrefetch, true.B, !s2_data_invalid)
   io.retrySlow.ld_idx := io.in.bits.uop.lqIdx.value
+  io.retrySlow.data_invalid_sq_idx := io.dataInvalidSqIdx
 
   // s2_cache_replay is quite slow to generate, send it separately to LQ
   io.needReplayFromRS := s2_cache_replay && !fullForward
@@ -608,6 +610,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule with HasLoadHelper {
 
   io.lsq.retryFast := load_s1.io.retryFast
   io.lsq.retrySlow := load_s2.io.retrySlow
+  io.lsq.retrySlow.valid := load_s2.io.retrySlow.valid && !load_s2.io.out.bits.uop.robIdx.needFlush(io.redirect)
 
 
   // write to rob and writeback bus

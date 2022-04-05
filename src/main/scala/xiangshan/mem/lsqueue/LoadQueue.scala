@@ -104,6 +104,8 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     // for load retry
     val retryFast = Vec(LoadPipelineWidth, Flipped(new LoadToLsqFastIO))
     val retrySlow = Vec(LoadPipelineWidth, Flipped(new LoadToLsqSlowIO))
+
+    val storeDataValidVec = Vec(StoreQueueSize, Input(Bool()))
   })
 
   println("LoadQueue: size:" + LoadQueueSize)
@@ -142,15 +144,17 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   
   // ptrs to control which cycle to choose
   val block_ptr_tlb = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
-  val block_ptr_datainvalid = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
   val block_ptr_others = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
 
   // specific cycles to block
-  val block_cycles_tlb = RegInit(VecInit(Seq(4.U(ReSelectLen.W), 8.U(ReSelectLen.W), 10.U(ReSelectLen.W), 10.U(ReSelectLen.W))))
-  val block_cycles_datainvalid = RegInit(VecInit(Seq(8.U(ReSelectLen.W), 8.U(ReSelectLen.W), 10.U(ReSelectLen.W), 10.U(ReSelectLen.W))))
-  val block_cycles_others = RegInit(VecInit(Seq(0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 1.U(ReSelectLen.W), 2.U(ReSelectLen.W))))
+  val block_cycles_tlb = RegInit(VecInit(Seq(1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 5.U(ReSelectLen.W))))
+  val block_cycles_others = RegInit(VecInit(Seq(0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 1.U(ReSelectLen.W))))
 
   val sel_blocked = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
+
+  // data forward block
+  val block_sq_idx = RegInit(VecInit(List.fill(LoadQueueSize)(0.U((log2Ceil(StoreQueueSize).W)))))
+  val block_by_data_forward_fail = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
 
   val creditUpdate = WireInit(VecInit(List.fill(LoadQueueSize)(0.U(ReSelectLen.W))))
 
@@ -159,6 +163,10 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   (0 until LoadQueueSize).map(i => {
     creditUpdate(i) := Mux(credit(i) > 0.U(ReSelectLen.W), credit(i) - 1.U(ReSelectLen.W), credit(i))
     sel_blocked(i) := creditUpdate(i) =/= 0.U(ReSelectLen.W) || credit(i) =/= 0.U(ReSelectLen.W)
+  })
+
+  (0 until LoadQueueSize).map(i => {
+    block_by_data_forward_fail(i) := Mux(block_by_data_forward_fail(i) === true.B && io.storeDataValidVec(block_sq_idx(i)) === true.B , false.B, block_by_data_forward_fail(i))
   })
 
   val debug_mmio = Reg(Vec(LoadQueueSize, Bool())) // mmio: inst is an mmio inst
@@ -212,8 +220,9 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       * used for delaying load(block-ptr to control how many cycles to block)
       */
       block_ptr_tlb(index) := 0.U(2.W)
-      block_ptr_datainvalid(index) := 0.U(2.W)
       block_ptr_others(index) := 0.U(2.W)
+
+      block_by_data_forward_fail(index) := false.B
 
     }
     io.enq.resp(i) := lqIdx
@@ -229,7 +238,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   val s2_block_load_mask = RegNext(s1_block_load_mask)
 
   ld_retry_idx := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
-    val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i)
+    val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
     allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i))
   }), deqPtr)
 
@@ -245,7 +254,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     io.loadOut(i) <> io.rsLoadIn(i)
 
     if(i == (LoadPipelineWidth - 1)){
-      val blocked = s1_block_load_mask(ld_retry_idx) || s2_block_load_mask(ld_retry_idx) || sel_blocked(i)
+      val blocked = s1_block_load_mask(ld_retry_idx) || s2_block_load_mask(ld_retry_idx) || sel_blocked(ld_retry_idx) || block_by_data_forward_fail(ld_retry_idx)
       val canfire_retry = allocated(ld_retry_idx) && !blocked && (!tlb_hited(ld_retry_idx) || !ld_ld_check_ok(ld_retry_idx) || !cache_bank_no_conflict(ld_retry_idx) || !cache_no_replay(ld_retry_idx) || !forward_data_valid(ld_retry_idx))
       when(!io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
 
@@ -372,7 +381,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       vaddrModule.io.wen(i) := true.B
 
       // TODO: fix me 
-      uop(rsLdWbIndex) := io.rsLoadIn(i).bits.uop
+      // uop(rsLdWbIndex) := io.rsLoadIn(i).bits.uop
     }
 
     /**
@@ -399,14 +408,23 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       cache_no_replay(idx) := io.retrySlow(i).cache_no_replay
       forward_data_valid(idx) := io.retrySlow(i).forward_data_valid
 
+      val invalid_sq_idx = io.retrySlow(i).data_invalid_sq_idx
+
       when(needretry) {
-        creditUpdate(idx) := Mux( !io.retrySlow(i).tlb_hited, block_cycles_tlb(block_ptr_tlb(idx)), Mux(!io.retrySlow(i).cache_no_replay, block_cycles_others(block_ptr_others(idx)), block_cycles_datainvalid(block_ptr_datainvalid(idx))))
+        creditUpdate(idx) := Mux( !io.retrySlow(i).tlb_hited, block_cycles_tlb(block_ptr_tlb(idx)), Mux(!io.retrySlow(i).cache_no_replay, block_cycles_others(block_ptr_others(idx)), 0.U))
         when(!io.retrySlow(i).tlb_hited) {
           block_ptr_tlb(idx) := Mux(block_ptr_tlb(idx) === 3.U(2.W), block_ptr_tlb(idx), block_ptr_tlb(idx) + 1.U(2.W))
         }.elsewhen(!io.retrySlow(i).cache_no_replay) {
           block_ptr_others(idx) := Mux(block_ptr_others(idx) === 3.U(2.W), block_ptr_others(idx), block_ptr_others(idx) + 1.U(2.W))
-        }.otherwise {
-          block_ptr_datainvalid(idx) := Mux(block_ptr_datainvalid(idx) === 3.U(2.W), block_ptr_datainvalid(idx), block_ptr_datainvalid(idx) + 1.U(2.W))
+        }
+      }
+      
+      block_by_data_forward_fail(idx) := false.B
+
+      when(!io.retrySlow(i).forward_data_valid) {
+        when(!io.storeDataValidVec(invalid_sq_idx)) {
+          block_by_data_forward_fail(idx) := true.B
+          block_sq_idx(idx) := invalid_sq_idx
         }
       }
     }

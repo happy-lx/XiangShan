@@ -70,6 +70,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     val sqempty = Output(Bool())
     val issuePtrExt = Output(new SqPtr) // used to wake up delayed load/store
     val sqFull = Output(Bool())
+
+    val storeDataValidVec = Vec(StoreQueueSize, Output(Bool()))
   })
 
   println("StoreQueue: size:" + StoreQueueSize)
@@ -136,7 +138,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
   // used to delay tlb-missed store's re-selecting  
   val block_ptr = RegInit(VecInit(List.fill(StoreQueueSize)(0.U(2.W))))
-  val block_cycles = RegInit(VecInit(Seq(4.U(ReSelectLen.W), 8.U(ReSelectLen.W), 10.U(ReSelectLen.W), 10.U(ReSelectLen.W))))
+  val block_cycles = RegInit(VecInit(Seq(1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 5.U(ReSelectLen.W))))
 
   val credit = RegInit(VecInit(List.fill(StoreQueueSize)(0.U(ReSelectLen.W))))
   val creditUpdate = WireInit(VecInit(List.fill(StoreQueueSize)(0.U(ReSelectLen.W))))
@@ -148,6 +150,10 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     creditUpdate(i) := Mux(credit(i) > 0.U(ReSelectLen.W), credit(i) - 1.U(ReSelectLen.W), credit(i))
     sel_blocked(i) := creditUpdate(i) =/= 0.U(ReSelectLen.W) || credit(i) =/= 0.U(ReSelectLen.W)
   })
+
+  (0 until StoreQueueSize).map{i => {
+    io.storeDataValidVec(i) := datavalid(i)
+  }}
 
   // Read dataModule
   // deqPtrExtNext and deqPtrExtNext+1 entry will be read from dataModule
@@ -350,7 +356,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     io.storeOut(i) <> io.rsStoreIn(i)
 
     if(i == (StorePipelineWidth - 1)){
-      val blocked = s1_block_store_mask(st_retry_idx) || s2_block_store_mask(st_retry_idx) || sel_blocked(i)
+      val blocked = s1_block_store_mask(st_retry_idx) || s2_block_store_mask(st_retry_idx) || sel_blocked(st_retry_idx)
       val canfire_retry = allocated(st_retry_idx) && addrvalid(st_retry_idx) && !ispyhsical(st_retry_idx) && !blocked
       when(!io.rsStoreIn(i).valid && canfire_retry && io.storeOut(i).ready) {
 
@@ -444,7 +450,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     // If addr match, data not ready, mark it as dataInvalid
     // load_s1: generate dataInvalid in load_s1 to set fastUop
     io.forward(i).dataInvalidFast := (addrValidVec.asUInt & ~dataValidVec.asUInt & vaddrModule.io.forwardMmask(i).asUInt & needForward).orR
-    val dataInvalidSqIdxReg = RegNext(OHToUInt(addrValidVec.asUInt & ~dataValidVec.asUInt & vaddrModule.io.forwardMmask(i).asUInt & needForward))
+    val dataInvalidSqIdxReg = RegNext(PriorityEncoder(addrValidVec.asUInt & ~dataValidVec.asUInt & vaddrModule.io.forwardMmask(i).asUInt & needForward))
     // load_s2
     io.forward(i).dataInvalid := RegNext(io.forward(i).dataInvalidFast)
 
