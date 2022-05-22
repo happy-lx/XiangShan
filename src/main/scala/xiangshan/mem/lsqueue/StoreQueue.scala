@@ -97,10 +97,10 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val vaddrModule = Module(new SQAddrModule(
     dataWidth = VAddrBits,
     numEntries = StoreQueueSize,
-    numRead = StorePipelineWidth + 2, // sbuffer 2 + badvaddr 1 + retry vaddr (TODO)
+    numRead = StorePipelineWidth + 3, // sbuffer 2 + badvaddr 1 + retry vaddr 2 (TODO)
     numWrite = StorePipelineWidth,
     numForward = StorePipelineWidth,
-    lastReadAsy = true
+    lastTwoReadAsy = true
   ))
   vaddrModule.io := DontCare
   val debug_paddr = Reg(Vec(StoreQueueSize, UInt((PAddrBits).W)))
@@ -134,7 +134,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
   val commitCount = RegNext(io.rob.scommit)
 
-  val st_retry_idx = WireInit(0.U(log2Ceil(StoreQueueSize).W))
+  val st_retry_idx_odd = WireInit(0.U(log2Ceil(StoreQueueSize).W))
+  val st_retry_idx_even = WireInit(0.U(log2Ceil(StoreQueueSize).W))
 
   // used to delay tlb-missed store's re-selecting  
   val block_ptr = RegInit(VecInit(List.fill(StoreQueueSize)(0.U(2.W))))
@@ -176,7 +177,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   // no inst will be commited 1 cycle before tval update
   vaddrModule.io.raddr(StorePipelineWidth) := (cmtPtrExt(0) + commitCount).value
 
-  vaddrModule.io.raddr(StorePipelineWidth + 1) := st_retry_idx
+  vaddrModule.io.raddr(StorePipelineWidth + 1) := st_retry_idx_odd
+  vaddrModule.io.raddr(StorePipelineWidth + 2) := st_retry_idx_even
 
   /**
     * Enqueue at dispatch
@@ -341,40 +343,90 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val s1_block_store_mask = RegNext(s0_block_store_mask)
   val s2_block_store_mask = RegNext(s1_block_store_mask)
 
-  st_retry_idx := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
+  val sq_odd_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>{
+    if(x % 2 == 0) {
+      false.B
+    }else {
+      true.B
+    }
+  })))
+  val sq_even_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>{
+    if(x % 2 == 0) {
+      true.B
+    }else {
+      false.B
+    }
+  })))
+
+  st_retry_idx_odd := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
     val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
-    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked
+    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked && sq_odd_mask(i)
   }), deqPtr)
 
-  val retry_fired = WireInit(false.B)
+  st_retry_idx_even := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
+    val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
+    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked && sq_even_mask(i)
+  }), deqPtr)
 
-  when(retry_fired) {
-    s0_block_store_mask(st_retry_idx) := true.B
+  val retry_fired_odd = WireInit(false.B)
+  val retry_fired_even = WireInit(false.B)
+
+  when(retry_fired_odd) {
+    s0_block_store_mask(st_retry_idx_odd) := true.B
+  }
+
+  when(retry_fired_even) {
+    s0_block_store_mask(st_retry_idx_even) := true.B
   }
 
   for(i <- 0 until StorePipelineWidth) {
     io.storeOut(i) <> io.rsStoreIn(i)
 
     if(i == (StorePipelineWidth - 1)){
-      val blocked = s1_block_store_mask(st_retry_idx) || s2_block_store_mask(st_retry_idx) || sel_blocked(st_retry_idx)
-      val canfire_retry = allocated(st_retry_idx) && addrvalid(st_retry_idx) && !ispyhsical(st_retry_idx) && !blocked
+      val blocked = s1_block_store_mask(st_retry_idx_odd) || s2_block_store_mask(st_retry_idx_odd) || sel_blocked(st_retry_idx_odd)
+      val canfire_retry = allocated(st_retry_idx_odd) && addrvalid(st_retry_idx_odd) && !ispyhsical(st_retry_idx_odd) && !blocked && st_retry_idx_odd(0) === 1.U
       when(!io.rsStoreIn(i).valid && canfire_retry && io.storeOut(i).ready) {
 
-        val addrAligned = LookupTree(uop(st_retry_idx).ctrl.fuOpType(1,0), List(
+        val addrAligned = LookupTree(uop(st_retry_idx_odd).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
           "b01".U   -> (io.storeOut(i).bits.vaddr(0) === 0.U),   //h
           "b10".U   -> (io.storeOut(i).bits.vaddr(1,0) === 0.U), //w
           "b11".U   -> (io.storeOut(i).bits.vaddr(2,0) === 0.U)  //d
         ))
 
-        retry_fired := true.B
+        retry_fired_odd := true.B
         io.storeOut(i).valid := true.B
         io.storeOut(i).bits.isStoreRetry := true.B
         // should we save uop when rs issues ?
-        io.storeOut(i).bits.uop := uop(st_retry_idx)
+        io.storeOut(i).bits.uop := uop(st_retry_idx_odd)
         io.storeOut(i).bits.vaddr := vaddrModule.io.rdata(StorePipelineWidth + 1)
-        io.storeOut(i).bits.mask := genWmask(vaddrModule.io.rdata(StorePipelineWidth + 1), uop(st_retry_idx).ctrl.fuOpType(1,0))
-        io.storeOut(i).bits.wlineflag := uop(st_retry_idx).ctrl.fuOpType === LSUOpType.cbo_zero
+        io.storeOut(i).bits.mask := genWmask(vaddrModule.io.rdata(StorePipelineWidth + 1), uop(st_retry_idx_odd).ctrl.fuOpType(1,0))
+        io.storeOut(i).bits.wlineflag := uop(st_retry_idx_odd).ctrl.fuOpType === LSUOpType.cbo_zero
+        io.storeOut(i).bits.uop.cf.exceptionVec(storeAddrMisaligned) := !addrAligned
+        io.storeOut(i).bits.rsIdx := DontCare
+      }
+    }
+
+      if(i == (StorePipelineWidth - 2)){
+      val blocked = s1_block_store_mask(st_retry_idx_even) || s2_block_store_mask(st_retry_idx_even) || sel_blocked(st_retry_idx_even)
+      val canfire_retry = allocated(st_retry_idx_even) && addrvalid(st_retry_idx_even) && !ispyhsical(st_retry_idx_even) && !blocked && st_retry_idx_even(0) === 0.U
+      when(!io.rsStoreIn(i).valid && canfire_retry && io.storeOut(i).ready) {
+
+        val addrAligned = LookupTree(uop(st_retry_idx_even).ctrl.fuOpType(1,0), List(
+          "b00".U   -> true.B,              //b
+          "b01".U   -> (io.storeOut(i).bits.vaddr(0) === 0.U),   //h
+          "b10".U   -> (io.storeOut(i).bits.vaddr(1,0) === 0.U), //w
+          "b11".U   -> (io.storeOut(i).bits.vaddr(2,0) === 0.U)  //d
+        ))
+
+        retry_fired_even := true.B
+        io.storeOut(i).valid := true.B
+        io.storeOut(i).bits.isStoreRetry := true.B
+        // should we save uop when rs issues ?
+        io.storeOut(i).bits.uop := uop(st_retry_idx_even)
+        io.storeOut(i).bits.vaddr := vaddrModule.io.rdata(StorePipelineWidth + 2)
+        io.storeOut(i).bits.mask := genWmask(vaddrModule.io.rdata(StorePipelineWidth + 2), uop(st_retry_idx_even).ctrl.fuOpType(1,0))
+        io.storeOut(i).bits.wlineflag := uop(st_retry_idx_even).ctrl.fuOpType === LSUOpType.cbo_zero
         io.storeOut(i).bits.uop.cf.exceptionVec(storeAddrMisaligned) := !addrAligned
         io.storeOut(i).bits.rsIdx := DontCare
       }
@@ -385,7 +437,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     }
   }
 
-  XSPerfAccumulate("store_retry", retry_fired)
+  XSPerfAccumulate("store_retry_odd", retry_fired_odd)
+  XSPerfAccumulate("store_retry_even", retry_fired_even)
 
   
 
