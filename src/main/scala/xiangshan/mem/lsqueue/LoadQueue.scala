@@ -277,7 +277,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     s0_block_load_mask(ld_retry_idx_even) := true.B
   }
 
-  assert(!retry_fired_even || !retry_fired_odd || ld_retry_idx_even =/= ld_retry_idx_odd, "can not replay same load from lq at the same time")
+  // assert(!retry_fired_even || !retry_fired_odd || ld_retry_idx_even =/= ld_retry_idx_odd, "can not replay same load from lq at the same time")
 
   def replayFromLq(replay_idx : UInt, pipeline_idx : UInt, is_odd : Boolean) = {
     val blocked = s1_block_load_mask(replay_idx) || s2_block_load_mask(replay_idx) || sel_blocked(replay_idx) || block_by_data_forward_fail(replay_idx)
