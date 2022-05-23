@@ -255,12 +255,12 @@ class LoadQueue(implicit p: Parameters) extends XSModule
 
   ld_retry_idx_odd := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
     val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
-    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_odd_mask(i)
+    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_odd_mask(i) && !uop(i).ctrl.replayInst
   }), deqPtr)
 
   ld_retry_idx_even := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
     val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
-    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_even_mask(i)
+    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_even_mask(i) && !uop(i).ctrl.replayInst
   }), deqPtr)
 
   vaddrModule.io.raddr(1) := ld_retry_idx_odd
@@ -277,17 +277,17 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     s0_block_load_mask(ld_retry_idx_even) := true.B
   }
 
-  assert(retry_fired_even && retry_fired_odd && ld_retry_idx_even =/= ld_retry_idx_odd, "can not replay same load from lq at the same time")
+  assert(!retry_fired_even || !retry_fired_odd || ld_retry_idx_even =/= ld_retry_idx_odd, "can not replay same load from lq at the same time")
 
   def replayFromLq(replay_idx : UInt, pipeline_idx : UInt, is_odd : Boolean) = {
     val blocked = s1_block_load_mask(replay_idx) || s2_block_load_mask(replay_idx) || sel_blocked(replay_idx) || block_by_data_forward_fail(replay_idx)
     val canfire_retry = Wire(Bool())
     val vaddr = Wire(UInt(VAddrBits.W))
     if(is_odd) {
-      canfire_retry := allocated(replay_idx) && !blocked && (!tlb_hited(replay_idx) || !ld_ld_check_ok(replay_idx) || !cache_bank_no_conflict(replay_idx) || !cache_no_replay(replay_idx) || !forward_data_valid(replay_idx)) && ld_retry_idx_odd(0) === 1.U
+      canfire_retry := allocated(replay_idx) && !blocked && (!tlb_hited(replay_idx) || !ld_ld_check_ok(replay_idx) || !cache_bank_no_conflict(replay_idx) || !cache_no_replay(replay_idx) || !forward_data_valid(replay_idx)) && ld_retry_idx_odd(0) === 1.U && !uop(replay_idx).ctrl.replayInst
       vaddr := vaddrModule.io.rdata(1)
     }else {
-      canfire_retry := allocated(replay_idx) && !blocked && (!tlb_hited(replay_idx) || !ld_ld_check_ok(replay_idx) || !cache_bank_no_conflict(replay_idx) || !cache_no_replay(replay_idx) || !forward_data_valid(replay_idx)) && ld_retry_idx_even(0) === 0.U
+      canfire_retry := allocated(replay_idx) && !blocked && (!tlb_hited(replay_idx) || !ld_ld_check_ok(replay_idx) || !cache_bank_no_conflict(replay_idx) || !cache_no_replay(replay_idx) || !forward_data_valid(replay_idx)) && ld_retry_idx_even(0) === 0.U && !uop(replay_idx).ctrl.replayInst
       vaddr := vaddrModule.io.rdata(2)
     }
     when(!io.rsLoadIn(pipeline_idx).valid && canfire_retry && io.loadOut(pipeline_idx).ready) {
@@ -318,7 +318,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
 
     if(i == (LoadPipelineWidth - 1)){
       val blocked = s1_block_load_mask(ld_retry_idx_odd) || s2_block_load_mask(ld_retry_idx_odd) || sel_blocked(ld_retry_idx_odd) || block_by_data_forward_fail(ld_retry_idx_odd)
-      val canfire_retry = allocated(ld_retry_idx_odd) && !blocked && (!tlb_hited(ld_retry_idx_odd) || !ld_ld_check_ok(ld_retry_idx_odd) || !cache_bank_no_conflict(ld_retry_idx_odd) || !cache_no_replay(ld_retry_idx_odd) || !forward_data_valid(ld_retry_idx_odd)) && ld_retry_idx_odd(0) === 1.U
+      val canfire_retry = allocated(ld_retry_idx_odd) && !blocked && (!tlb_hited(ld_retry_idx_odd) || !ld_ld_check_ok(ld_retry_idx_odd) || !cache_bank_no_conflict(ld_retry_idx_odd) || !cache_no_replay(ld_retry_idx_odd) || !forward_data_valid(ld_retry_idx_odd)) && ld_retry_idx_odd(0) === 1.U && !uop(ld_retry_idx_odd).ctrl.replayInst
       when(!io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
 
         val addrAligned = LookupTree(uop(ld_retry_idx_odd).ctrl.fuOpType(1,0), List(
@@ -341,7 +341,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
 
     if(i == (LoadPipelineWidth - 2)) {
       val blocked = s1_block_load_mask(ld_retry_idx_even) || s2_block_load_mask(ld_retry_idx_even) || sel_blocked(ld_retry_idx_even) || block_by_data_forward_fail(ld_retry_idx_even)
-      val canfire_retry = allocated(ld_retry_idx_even) && !blocked && (!tlb_hited(ld_retry_idx_even) || !ld_ld_check_ok(ld_retry_idx_even) || !cache_bank_no_conflict(ld_retry_idx_even) || !cache_no_replay(ld_retry_idx_even) || !forward_data_valid(ld_retry_idx_even)) && ld_retry_idx_even(0) === 0.U
+      val canfire_retry = allocated(ld_retry_idx_even) && !blocked && (!tlb_hited(ld_retry_idx_even) || !ld_ld_check_ok(ld_retry_idx_even) || !cache_bank_no_conflict(ld_retry_idx_even) || !cache_no_replay(ld_retry_idx_even) || !forward_data_valid(ld_retry_idx_even)) && ld_retry_idx_even(0) === 0.U && !uop(ld_retry_idx_even).ctrl.replayInst
       when(!io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
 
         val addrAligned = LookupTree(uop(ld_retry_idx_even).ctrl.fuOpType(1,0), List(
