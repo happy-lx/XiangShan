@@ -131,7 +131,8 @@ class Scheduler(
 
   val numIssuePorts = configs.map(_._2).sum
   val numReplayPorts = reservationStations.filter(_.params.hasFeedback == true).map(_.params.numDeq).sum
-  val memRsEntries = reservationStations.filter(_.params.hasFeedback == true).map(_.params.numEntries)
+  val numLsqReplayPorts = reservationStations.filter(_.params.lsqFeedback == true).map(_.params.numDeq).sum
+  val memRsEntries = reservationStations.filter(_.params.lsqFeedback == true).map(_.params.numEntries)
   val getMemRsEntries = {
     require(memRsEntries.isEmpty || memRsEntries.max == memRsEntries.min, "different indexes not supported")
     if (memRsEntries.isEmpty) 0 else memRsEntries.max
@@ -207,7 +208,7 @@ class SchedulerImp(outer: Scheduler) extends LazyModuleImp(outer) with HasXSPara
     val jalr_target = Input(UInt(VAddrBits.W))
     val stIssuePtr = Input(new SqPtr())
     // special ports for load / store rs
-    val enqLsq = if (outer.numReplayPorts > 0) Some(Flipped(new LsqEnqIO)) else None
+    val enqLsq = if (outer.numLsqReplayPorts > 0) Some(Flipped(new LsqEnqIO)) else None
     val memWaitUpdateReq = Flipped(new MemWaitUpdateReq)
     // debug
     val debug_int_rat = Vec(32, Input(UInt(PhyRegIdxWidth.W)))

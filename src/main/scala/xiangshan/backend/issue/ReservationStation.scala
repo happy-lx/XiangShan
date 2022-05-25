@@ -40,6 +40,7 @@ case class RSParams
   var numFastWakeup: Int = 0,
   var numWakeup: Int = 0,
   var hasFeedback: Boolean = false,
+  var lsqFeedback: Boolean = false,
   var delayedRf: Boolean = false,
   var fixedLatency: Int = -1,
   var checkWaitBit: Boolean = false,
@@ -89,8 +90,9 @@ class ReservationStationWrapper(implicit p: Parameters) extends LazyModule with 
       params.numSrc = 2
     }
     if (cfg == StaExeUnitCfg || cfg == LdExeUnitCfg) {
-      params.hasFeedback = true
-      params.checkWaitBit = true
+      // params.hasFeedback = true
+      // params.checkWaitBit = true
+      params.lsqFeedback = true
     }
     if (cfg.hasCertainLatency) {
       params.fixedLatency = if (cfg == MulDivExeUnitCfg) mulCfg.latency.latencyVal.get else cfg.latency.latencyVal.get
@@ -598,10 +600,10 @@ class ReservationStation(params: RSParams)(implicit p: Parameters) extends XSMod
           s2_deq(i).ready := true.B
         }
         io.load.get.fastMatch(i) := Mux(s2_deq(i).valid, 0.U, ldCanBeFast)
-        when (!s2_deq(i).valid) {
-          io.feedback.get(i).rsIdx := s1_issue_index(i)
-          io.feedback.get(i).isFirstIssue := s1_first_issue(i)
-        }
+        // when (!s2_deq(i).valid) {
+        //   io.feedback.get(i).rsIdx := s1_issue_index(i)
+        //   io.feedback.get(i).isFirstIssue := s1_first_issue(i)
+        // }
         XSPerfAccumulate(s"fast_load_deq_valid_$i", !s2_deq(i).valid && ldFastDeq.valid)
         XSPerfAccumulate(s"fast_load_deq_fire_$i", !s2_deq(i).valid && ldFastDeq.valid && io.deq(i).ready)
       }
