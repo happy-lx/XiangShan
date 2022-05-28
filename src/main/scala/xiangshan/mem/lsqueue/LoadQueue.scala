@@ -147,8 +147,8 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   val block_ptr_others = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
 
   // specific cycles to block
-  val block_cycles_tlb = RegInit(VecInit(Seq(1.U(ReSelectLen.W), 2.U(ReSelectLen.W), 3.U(ReSelectLen.W), 5.U(ReSelectLen.W))))
-  val block_cycles_others = RegInit(VecInit(Seq(0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 1.U(ReSelectLen.W))))
+  val block_cycles_tlb = RegInit(VecInit(Seq(1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 8.U(ReSelectLen.W))))
+  val block_cycles_others = RegInit(VecInit(Seq(0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 0.U(ReSelectLen.W))))
 
   val sel_blocked = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
 
@@ -392,6 +392,11 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     ) && (!s0_block_load_mask(i) && !s1_block_load_mask(i) && !s2_block_load_mask(i)) && retry_fired_odd
     )
   )))
+  XSPerfAccumulate("load_tlb_miss_ptr_0", PopCount(VecInit((0 until LoadQueueSize).map(i => allocated(i) && !tlb_hited(i) && block_ptr_tlb(i) === 0.U))))
+  XSPerfAccumulate("load_tlb_miss_ptr_1", PopCount(VecInit((0 until LoadQueueSize).map(i => allocated(i) && !tlb_hited(i) && block_ptr_tlb(i) === 1.U))))
+  XSPerfAccumulate("load_tlb_miss_ptr_2", PopCount(VecInit((0 until LoadQueueSize).map(i => allocated(i) && !tlb_hited(i) && block_ptr_tlb(i) === 2.U))))
+  XSPerfAccumulate("load_tlb_miss_ptr_3", PopCount(VecInit((0 until LoadQueueSize).map(i => allocated(i) && !tlb_hited(i) && block_ptr_tlb(i) === 3.U))))
+  
   /**
     * Writeback load from load units
     *

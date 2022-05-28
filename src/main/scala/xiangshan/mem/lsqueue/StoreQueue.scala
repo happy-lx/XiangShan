@@ -139,7 +139,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
   // used to delay tlb-missed store's re-selecting  
   val block_ptr = RegInit(VecInit(List.fill(StoreQueueSize)(0.U(2.W))))
-  val block_cycles = RegInit(VecInit(Seq(1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 5.U(ReSelectLen.W))))
+  val block_cycles = RegInit(VecInit(Seq(0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 5.U(ReSelectLen.W))))
 
   val credit = RegInit(VecInit(List.fill(StoreQueueSize)(0.U(ReSelectLen.W))))
   val creditUpdate = WireInit(VecInit(List.fill(StoreQueueSize)(0.U(ReSelectLen.W))))
@@ -439,6 +439,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
   XSPerfAccumulate("store_retry_odd", retry_fired_odd)
   XSPerfAccumulate("store_retry_even", retry_fired_even)
+
+  XSPerfAccumulate("store_tlb_miss_ptr_0", PopCount(VecInit((0 until StoreQueueSize).map(i => allocated(i) && addrvalid(i) && !ispyhsical(i) && block_ptr(i) === 0.U))))
+  XSPerfAccumulate("store_tlb_miss_ptr_1", PopCount(VecInit((0 until StoreQueueSize).map(i => allocated(i) && addrvalid(i) && !ispyhsical(i) && block_ptr(i) === 1.U))))
+  XSPerfAccumulate("store_tlb_miss_ptr_2", PopCount(VecInit((0 until StoreQueueSize).map(i => allocated(i) && addrvalid(i) && !ispyhsical(i) && block_ptr(i) === 2.U))))
+  XSPerfAccumulate("store_tlb_miss_ptr_3", PopCount(VecInit((0 until StoreQueueSize).map(i => allocated(i) && addrvalid(i) && !ispyhsical(i) && block_ptr(i) === 3.U))))
 
   
 
