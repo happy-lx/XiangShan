@@ -147,7 +147,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   val block_ptr_others = RegInit(VecInit(List.fill(LoadQueueSize)(0.U(2.W))))
 
   // specific cycles to block
-  val block_cycles_tlb = RegInit(VecInit(Seq(1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 8.U(ReSelectLen.W))))
+  val block_cycles_tlb = RegInit(VecInit(Seq(1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 1.U(ReSelectLen.W), 5.U(ReSelectLen.W))))
   val block_cycles_others = RegInit(VecInit(Seq(0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 0.U(ReSelectLen.W), 0.U(ReSelectLen.W))))
 
   val sel_blocked = RegInit(VecInit(List.fill(LoadQueueSize)(false.B)))
@@ -319,7 +319,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     if(i == (LoadPipelineWidth - 1)){
       val blocked = s1_block_load_mask(ld_retry_idx_odd) || s2_block_load_mask(ld_retry_idx_odd) || sel_blocked(ld_retry_idx_odd) || block_by_data_forward_fail(ld_retry_idx_odd)
       val canfire_retry = allocated(ld_retry_idx_odd) && !blocked && (!tlb_hited(ld_retry_idx_odd) || !ld_ld_check_ok(ld_retry_idx_odd) || !cache_bank_no_conflict(ld_retry_idx_odd) || !cache_no_replay(ld_retry_idx_odd) || !forward_data_valid(ld_retry_idx_odd)) && ld_retry_idx_odd(0) === 1.U && !uop(ld_retry_idx_odd).ctrl.replayInst
-      when(!io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
+      when(canfire_retry && io.loadOut(i).ready) {
 
         val addrAligned = LookupTree(uop(ld_retry_idx_odd).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -337,12 +337,21 @@ class LoadQueue(implicit p: Parameters) extends XSModule
         io.loadOut(i).bits.mask := genWmask(vaddrModule.io.rdata(1), uop(ld_retry_idx_odd).ctrl.fuOpType(1,0))
         io.loadOut(i).bits.uop.cf.exceptionVec(loadAddrMisaligned) := !addrAligned
       }
+      when(io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
+        // replay load has higher priority than rs-issued load
+        // make this rs-issued load replay in next cycle
+        val rsLdWbIndex = io.rsLoadIn(i).bits.uop.lqIdx.value
+        assert(allocated(rsLdWbIndex) === true.B, "rs issued a unallocted entry")
+
+        // make this load as cache-bank-conflic
+        cache_bank_no_conflict(rsLdWbIndex) := false.B
+      }
     }
 
     if(i == (LoadPipelineWidth - 2)) {
       val blocked = s1_block_load_mask(ld_retry_idx_even) || s2_block_load_mask(ld_retry_idx_even) || sel_blocked(ld_retry_idx_even) || block_by_data_forward_fail(ld_retry_idx_even)
       val canfire_retry = allocated(ld_retry_idx_even) && !blocked && (!tlb_hited(ld_retry_idx_even) || !ld_ld_check_ok(ld_retry_idx_even) || !cache_bank_no_conflict(ld_retry_idx_even) || !cache_no_replay(ld_retry_idx_even) || !forward_data_valid(ld_retry_idx_even)) && ld_retry_idx_even(0) === 0.U && !uop(ld_retry_idx_even).ctrl.replayInst
-      when(!io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
+      when(canfire_retry && io.loadOut(i).ready) {
 
         val addrAligned = LookupTree(uop(ld_retry_idx_even).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -360,11 +369,20 @@ class LoadQueue(implicit p: Parameters) extends XSModule
         io.loadOut(i).bits.mask := genWmask(vaddrModule.io.rdata(2), uop(ld_retry_idx_even).ctrl.fuOpType(1,0))
         io.loadOut(i).bits.uop.cf.exceptionVec(loadAddrMisaligned) := !addrAligned
       }
+      when(io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
+        // replay load has higher priority than rs-issued load
+        // make this rs-issued load replay in next cycle
+        val rsLdWbIndex = io.rsLoadIn(i).bits.uop.lqIdx.value
+        assert(allocated(rsLdWbIndex) === true.B, "rs issued a unallocted entry")
+
+        // make this load as cache-bank-conflic
+        cache_bank_no_conflict(rsLdWbIndex) := false.B
+      }
     }
 
-    when(io.rsLoadIn(i).valid){
-      s0_block_load_mask(io.rsLoadIn(i).bits.uop.lqIdx.value) := true.B
-    }
+    // when(io.rsLoadIn(i).valid){
+    //   s0_block_load_mask(io.rsLoadIn(i).bits.uop.lqIdx.value) := true.B
+    // }
   }
 
   XSPerfAccumulate("load_retry_odd", retry_fired_odd)
@@ -489,6 +507,10 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       when(needretry) {
         creditUpdate(idx) := block_cycles_others(block_ptr_others(idx))
         block_ptr_others(idx) := Mux(block_ptr_others(idx) === 3.U(2.W), block_ptr_others(idx), block_ptr_others(idx) + 1.U(2.W))
+        // assert(s1_block_load_mask(idx) === true.B, "retryFast load must be in load_s1")
+        // try to replay this load in next cycle
+        s1_block_load_mask(idx) := false.B
+        s2_block_load_mask(idx) := false.B
       }
     }
 

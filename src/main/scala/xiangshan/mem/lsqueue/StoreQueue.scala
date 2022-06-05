@@ -385,7 +385,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
     if(i == (StorePipelineWidth - 1)){
       val blocked = s1_block_store_mask(st_retry_idx_odd) || s2_block_store_mask(st_retry_idx_odd) || sel_blocked(st_retry_idx_odd)
       val canfire_retry = allocated(st_retry_idx_odd) && addrvalid(st_retry_idx_odd) && !ispyhsical(st_retry_idx_odd) && !blocked && st_retry_idx_odd(0) === 1.U
-      when(!io.rsStoreIn(i).valid && canfire_retry && io.storeOut(i).ready) {
+      when(canfire_retry && io.storeOut(i).ready) {
 
         val addrAligned = LookupTree(uop(st_retry_idx_odd).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -405,12 +405,15 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
         io.storeOut(i).bits.uop.cf.exceptionVec(storeAddrMisaligned) := !addrAligned
         io.storeOut(i).bits.rsIdx := DontCare
       }
+      when(io.rsStoreIn(i).valid && !canfire_retry && io.storeOut(i).ready) {
+        s0_block_store_mask(io.rsStoreIn(i).bits.uop.sqIdx.value) := true.B
+      }
     }
 
       if(i == (StorePipelineWidth - 2)){
       val blocked = s1_block_store_mask(st_retry_idx_even) || s2_block_store_mask(st_retry_idx_even) || sel_blocked(st_retry_idx_even)
       val canfire_retry = allocated(st_retry_idx_even) && addrvalid(st_retry_idx_even) && !ispyhsical(st_retry_idx_even) && !blocked && st_retry_idx_even(0) === 0.U
-      when(!io.rsStoreIn(i).valid && canfire_retry && io.storeOut(i).ready) {
+      when(canfire_retry && io.storeOut(i).ready) {
 
         val addrAligned = LookupTree(uop(st_retry_idx_even).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -430,11 +433,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
         io.storeOut(i).bits.uop.cf.exceptionVec(storeAddrMisaligned) := !addrAligned
         io.storeOut(i).bits.rsIdx := DontCare
       }
+      when(io.rsStoreIn(i).valid && !canfire_retry && io.storeOut(i).ready) {
+        s0_block_store_mask(io.rsStoreIn(i).bits.uop.sqIdx.value) := true.B
+      }
     }
 
-    when(io.rsStoreIn(i).valid){
-      s0_block_store_mask(io.rsStoreIn(i).bits.uop.sqIdx.value) := true.B
-    }
   }
 
   XSPerfAccumulate("store_retry_odd", retry_fired_odd)
