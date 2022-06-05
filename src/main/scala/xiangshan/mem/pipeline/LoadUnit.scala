@@ -393,26 +393,30 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule with HasLoadHelper {
   // so we do not need to care about flush in load / store unit's out.valid
   io.out.bits := io.in.bits
   io.out.bits.data := rdataPartialLoad
-  // when exception occurs, set it to not miss and let it write back to rob (via int port)
-  if (EnableFastForward) {
-    io.out.bits.miss := s2_cache_miss && 
-      !s2_exception && 
-      !s2_forward_fail &&
-      !fullForward &&
-      !s2_is_prefetch
-  } else {
-    io.out.bits.miss := s2_cache_miss &&
-      !s2_exception &&
-      !s2_forward_fail &&
-      !s2_is_prefetch
-  }
-  io.out.bits.uop.ctrl.fpWen := io.in.bits.uop.ctrl.fpWen && !s2_exception
+  
   // if forward fail, replay this inst from fetch
   val forwardFailReplay = s2_forward_fail && !s2_mmio
   // if ld-ld violation is detected, replay from this inst from fetch
   val ldldVioReplay = io.loadViolationQueryResp.valid &&
     io.loadViolationQueryResp.bits.have_violation &&
     RegNext(io.csrCtrl.ldld_vio_check)
+  // when exception occurs, set it to not miss and let it write back to rob (via int port)
+  if (EnableFastForward) {
+    io.out.bits.miss := s2_cache_miss && 
+      !s2_exception && 
+      !ldldVioReplay &&
+      !s2_forward_fail &&
+      !fullForward &&
+      !s2_is_prefetch
+  } else {
+    io.out.bits.miss := s2_cache_miss &&
+      !s2_exception &&
+      !ldldVioReplay &&
+      !s2_forward_fail &&
+      !s2_is_prefetch
+  }
+  io.out.bits.uop.ctrl.fpWen := io.in.bits.uop.ctrl.fpWen && !s2_exception
+
   io.out.bits.uop.ctrl.replayInst := forwardFailReplay || ldldVioReplay
   io.out.bits.mmio := s2_mmio
   io.out.bits.uop.ctrl.flushPipe := io.in.bits.uop.ctrl.flushPipe || (s2_mmio && io.sentFastUop)
