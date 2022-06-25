@@ -339,34 +339,66 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
   // select logic 
 
+  def getEvenBits(input: UInt): UInt = {
+    VecInit((0 until StoreQueueSize/2).map(i => {input(2*i)})).asUInt
+  }
+
+  def getOddBits(input: UInt): UInt = {
+    VecInit((0 until StoreQueueSize/2).map(i => {input(2*i+1)})).asUInt
+  }
+
+  def toVec(a: UInt): Vec[Bool] = {
+    VecInit(a.asBools)
+  }
+
+  def getFirstOne(mask: Vec[Bool], startMask: UInt) = {
+    val length = mask.length
+    val highBits = (0 until length).map(i => mask(i) & ~startMask(i))
+    val highBitsUint = Cat(highBits.reverse)
+    PriorityEncoder(Mux(highBitsUint.orR(), highBitsUint, mask.asUInt))
+  }
+
   val s0_block_store_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>false.B)))
   val s1_block_store_mask = RegNext(s0_block_store_mask)
   val s2_block_store_mask = RegNext(s1_block_store_mask)
 
-  val sq_odd_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>{
-    if(x % 2 == 0) {
-      false.B
-    }else {
-      true.B
-    }
-  })))
-  val sq_even_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>{
-    if(x % 2 == 0) {
-      true.B
-    }else {
-      false.B
-    }
-  })))
+  val evenDeqMask = getEvenBits(deqMask)
+  val oddDeqMask = getOddBits(deqMask)
 
-  st_retry_idx_odd := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
-    val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
-    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked && sq_odd_mask(i)
-  }), deqPtr)
+  // val sq_odd_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>{
+  //   if(x % 2 == 0) {
+  //     false.B
+  //   }else {
+  //     true.B
+  //   }
+  // })))
+  // val sq_even_mask = WireInit(VecInit((0 until StoreQueueSize).map(x=>{
+  //   if(x % 2 == 0) {
+  //     true.B
+  //   }else {
+  //     false.B
+  //   }
+  // })))
 
-  st_retry_idx_even := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
+  // st_retry_idx_odd := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
+  //   val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
+  //   allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked && sq_odd_mask(i)
+  // }), deqPtr)
+
+  st_retry_idx_odd := Cat(getFirstOne(toVec(getOddBits(VecInit((0 until StoreQueueSize).map(i => {
     val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
-    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked && sq_even_mask(i)
-  }), deqPtr)
+    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked
+  })).asUInt())), oddDeqMask), 1.U(1.W))
+
+  // st_retry_idx_even := AgePriorityEncoder((0 until StoreQueueSize).map(i => {
+  //   val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
+  //   allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked && sq_even_mask(i)
+  // }), deqPtr)
+
+  st_retry_idx_even := Cat(getFirstOne(toVec(getEvenBits(VecInit((0 until StoreQueueSize).map(i => {
+    val blocked = s1_block_store_mask(i) || s2_block_store_mask(i) || sel_blocked(i)
+    allocated(i) && addrvalid(i) && !ispyhsical(i) && !blocked
+  })).asUInt())), evenDeqMask), 0.U(1.W))
 
   val retry_fired_odd = WireInit(false.B)
   val retry_fired_even = WireInit(false.B)
@@ -382,10 +414,12 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
   for(i <- 0 until StorePipelineWidth) {
     io.storeOut(i) <> io.rsStoreIn(i)
 
+    val store_incoming_rob_idx = io.rsStoreIn(i).bits.uop.robIdx
+
     if(i == (StorePipelineWidth - 1)){
       val blocked = s1_block_store_mask(st_retry_idx_odd) || s2_block_store_mask(st_retry_idx_odd) || sel_blocked(st_retry_idx_odd)
       val canfire_retry = allocated(st_retry_idx_odd) && addrvalid(st_retry_idx_odd) && !ispyhsical(st_retry_idx_odd) && !blocked && st_retry_idx_odd(0) === 1.U
-      when(canfire_retry && io.storeOut(i).ready) {
+      when( (!io.rsStoreIn(i).valid || isAfter(store_incoming_rob_idx, uop(st_retry_idx_odd).robIdx)) && canfire_retry && io.storeOut(i).ready) {
 
         val addrAligned = LookupTree(uop(st_retry_idx_odd).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -405,7 +439,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
         io.storeOut(i).bits.uop.cf.exceptionVec(storeAddrMisaligned) := !addrAligned
         io.storeOut(i).bits.rsIdx := DontCare
       }
-      when(io.rsStoreIn(i).valid && !canfire_retry && io.storeOut(i).ready) {
+      when(io.rsStoreIn(i).valid && !retry_fired_odd && io.storeOut(i).ready) {
         s0_block_store_mask(io.rsStoreIn(i).bits.uop.sqIdx.value) := true.B
       }
     }
@@ -413,7 +447,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
       if(i == (StorePipelineWidth - 2)){
       val blocked = s1_block_store_mask(st_retry_idx_even) || s2_block_store_mask(st_retry_idx_even) || sel_blocked(st_retry_idx_even)
       val canfire_retry = allocated(st_retry_idx_even) && addrvalid(st_retry_idx_even) && !ispyhsical(st_retry_idx_even) && !blocked && st_retry_idx_even(0) === 0.U
-      when(canfire_retry && io.storeOut(i).ready) {
+      when( (!io.rsStoreIn(i).valid || isAfter(store_incoming_rob_idx, uop(st_retry_idx_even).robIdx)) && canfire_retry && io.storeOut(i).ready) {
 
         val addrAligned = LookupTree(uop(st_retry_idx_even).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -433,7 +467,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule with HasDCacheParamete
         io.storeOut(i).bits.uop.cf.exceptionVec(storeAddrMisaligned) := !addrAligned
         io.storeOut(i).bits.rsIdx := DontCare
       }
-      when(io.rsStoreIn(i).valid && !canfire_retry && io.storeOut(i).ready) {
+      when(io.rsStoreIn(i).valid && !retry_fired_even && io.storeOut(i).ready) {
         s0_block_store_mask(io.rsStoreIn(i).bits.uop.sqIdx.value) := true.B
       }
     }

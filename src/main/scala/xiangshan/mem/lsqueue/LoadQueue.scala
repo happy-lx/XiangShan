@@ -238,30 +238,43 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   val s1_block_load_mask = RegNext(s0_block_load_mask)
   val s2_block_load_mask = RegNext(s1_block_load_mask)
 
-  val lq_odd_mask = WireInit(VecInit((0 until LoadQueueSize).map(x=>{
-    if(x % 2 == 0) {
-      false.B
-    }else {
-      true.B
-    }
-  })))
-  val lq_even_mask = WireInit(VecInit((0 until LoadQueueSize).map(x=>{
-    if(x % 2 == 0) {
-      true.B
-    }else {
-      false.B
-    }
-  })))
+  val evenDeqMask = getEvenBits(deqMask)
+  val oddDeqMask = getOddBits(deqMask)
 
-  ld_retry_idx_odd := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
-    val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
-    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_odd_mask(i) && !uop(i).ctrl.replayInst
-  }), deqPtr)
+  // val lq_odd_mask = WireInit(VecInit((0 until LoadQueueSize).map(x=>{
+  //   if(x % 2 == 0) {
+  //     false.B
+  //   }else {
+  //     true.B
+  //   }
+  // })))
+  // val lq_even_mask = WireInit(VecInit((0 until LoadQueueSize).map(x=>{
+  //   if(x % 2 == 0) {
+  //     true.B
+  //   }else {
+  //     false.B
+  //   }
+  // })))
 
-  ld_retry_idx_even := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
+  // ld_retry_idx_odd := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
+  //   val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
+  //   allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_odd_mask(i) && !uop(i).ctrl.replayInst
+  // }), deqPtr)
+
+  ld_retry_idx_odd := Cat(getFirstOne(toVec(getOddBits(VecInit((0 until LoadQueueSize).map(i => {
     val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
-    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_even_mask(i) && !uop(i).ctrl.replayInst
-  }), deqPtr)
+    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && !uop(i).ctrl.replayInst
+  })).asUInt())), oddDeqMask), 1.U(1.W))
+
+  // ld_retry_idx_even := AgePriorityEncoder((0 until LoadQueueSize).map(i => {
+  //   val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
+  //   allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && lq_even_mask(i) && !uop(i).ctrl.replayInst
+  // }), deqPtr)
+
+  ld_retry_idx_even := Cat(getFirstOne(toVec(getEvenBits(VecInit((0 until LoadQueueSize).map(i => {
+    val blocked = s1_block_load_mask(i) || s2_block_load_mask(i) || sel_blocked(i) || block_by_data_forward_fail(i)
+    allocated(i) && !blocked && (!tlb_hited(i) || !ld_ld_check_ok(i) || !cache_bank_no_conflict(i) || !cache_no_replay(i) || !forward_data_valid(i)) && !uop(i).ctrl.replayInst
+  })).asUInt())), evenDeqMask), 0.U(1.W))
 
   vaddrModule.io.raddr(1) := ld_retry_idx_odd
   vaddrModule.io.raddr(2) := ld_retry_idx_even
@@ -316,10 +329,12 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   for(i <- 0 until LoadPipelineWidth) {
     io.loadOut(i) <> io.rsLoadIn(i)
 
+    val load_incoming_rob_idx = io.rsLoadIn(i).bits.uop.robIdx
+
     if(i == (LoadPipelineWidth - 1)){
       val blocked = s1_block_load_mask(ld_retry_idx_odd) || s2_block_load_mask(ld_retry_idx_odd) || sel_blocked(ld_retry_idx_odd) || block_by_data_forward_fail(ld_retry_idx_odd)
       val canfire_retry = allocated(ld_retry_idx_odd) && !blocked && (!tlb_hited(ld_retry_idx_odd) || !ld_ld_check_ok(ld_retry_idx_odd) || !cache_bank_no_conflict(ld_retry_idx_odd) || !cache_no_replay(ld_retry_idx_odd) || !forward_data_valid(ld_retry_idx_odd)) && ld_retry_idx_odd(0) === 1.U && !uop(ld_retry_idx_odd).ctrl.replayInst
-      when(canfire_retry && io.loadOut(i).ready) {
+      when((!io.rsLoadIn(i).valid || isAfter(load_incoming_rob_idx, uop(ld_retry_idx_odd).robIdx)) && canfire_retry && io.loadOut(i).ready) {
 
         val addrAligned = LookupTree(uop(ld_retry_idx_odd).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -337,7 +352,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
         io.loadOut(i).bits.mask := genWmask(vaddrModule.io.rdata(1), uop(ld_retry_idx_odd).ctrl.fuOpType(1,0))
         io.loadOut(i).bits.uop.cf.exceptionVec(loadAddrMisaligned) := !addrAligned
       }
-      when(io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
+      when(io.rsLoadIn(i).valid && retry_fired_odd) {
         // replay load has higher priority than rs-issued load
         // make this rs-issued load replay in next cycle
         val rsLdWbIndex = io.rsLoadIn(i).bits.uop.lqIdx.value
@@ -351,7 +366,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     if(i == (LoadPipelineWidth - 2)) {
       val blocked = s1_block_load_mask(ld_retry_idx_even) || s2_block_load_mask(ld_retry_idx_even) || sel_blocked(ld_retry_idx_even) || block_by_data_forward_fail(ld_retry_idx_even)
       val canfire_retry = allocated(ld_retry_idx_even) && !blocked && (!tlb_hited(ld_retry_idx_even) || !ld_ld_check_ok(ld_retry_idx_even) || !cache_bank_no_conflict(ld_retry_idx_even) || !cache_no_replay(ld_retry_idx_even) || !forward_data_valid(ld_retry_idx_even)) && ld_retry_idx_even(0) === 0.U && !uop(ld_retry_idx_even).ctrl.replayInst
-      when(canfire_retry && io.loadOut(i).ready) {
+      when((!io.rsLoadIn(i).valid || isAfter(load_incoming_rob_idx, uop(ld_retry_idx_even).robIdx)) && canfire_retry && io.loadOut(i).ready) {
 
         val addrAligned = LookupTree(uop(ld_retry_idx_even).ctrl.fuOpType(1,0), List(
           "b00".U   -> true.B,              //b
@@ -369,7 +384,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
         io.loadOut(i).bits.mask := genWmask(vaddrModule.io.rdata(2), uop(ld_retry_idx_even).ctrl.fuOpType(1,0))
         io.loadOut(i).bits.uop.cf.exceptionVec(loadAddrMisaligned) := !addrAligned
       }
-      when(io.rsLoadIn(i).valid && canfire_retry && io.loadOut(i).ready) {
+      when(io.rsLoadIn(i).valid && retry_fired_even) {
         // replay load has higher priority than rs-issued load
         // make this rs-issued load replay in next cycle
         val rsLdWbIndex = io.rsLoadIn(i).bits.uop.lqIdx.value
@@ -589,8 +604,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   val loadWbSelVec = VecInit((0 until LoadQueueSize).map(i => {
     allocated(i) && !writebacked(i) && (datavalid(i) || refilling(i))
   })).asUInt() // use uint instead vec to reduce verilog lines
-  val evenDeqMask = getEvenBits(deqMask)
-  val oddDeqMask = getOddBits(deqMask)
+
   // generate lastCycleSelect mask
   val evenSelectMask = Mux(io.ldout(0).fire(), getEvenBits(UIntToOH(loadWbSel(0))), 0.U)
   val oddSelectMask = Mux(io.ldout(1).fire(), getOddBits(UIntToOH(loadWbSel(1))), 0.U)
